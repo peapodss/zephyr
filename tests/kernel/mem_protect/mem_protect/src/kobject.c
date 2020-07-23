@@ -177,7 +177,7 @@ static void kobject_grant_access_extra_entry(void *p1, void *p2, void *p3)
 }
 
 /**
- * @brief Test grant access.
+ * @brief Test grant access
  *
  * @details Will grant access to another thread for the
  * semaphore it holds.
@@ -294,9 +294,10 @@ static void access_all_grant_child_take(void *p1, void *p2, void *p3)
 }
 
 /**
- * @brief Test all access grant.
+ * @brief Test supervisor thread grants kernel objects all access public status
  *
- * @details Test the access by creating 2 new user threads.
+ * @details System makes kernel object kobject_public_sem public to all threads
+ * Test the access to that kernel object by creating two new user threads.
  *
  * @see k_object_access_all_grant()
  *
@@ -723,8 +724,12 @@ static void supervisor_from_user_child(void *p1, void *p2, void *p3)
 
 	zassert_unreachable("k_object validation failure in k thread create");
 }
+
 /**
- * @brief Test to create a new supervisor thread from user.
+ * @brief Test to create a new supervisor thread from user
+ *
+ * @details The system kernel must prevent user threads from creating supervisor
+ * threads.
  *
  * @ingroup kernel_memprotect_tests
  */

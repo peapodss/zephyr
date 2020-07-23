@@ -22,6 +22,7 @@
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <device.h>
+#include <drivers/gpio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -129,11 +130,16 @@ extern "C" {
  *    to act as a CS line
  * @param delay is a delay in microseconds to wait before starting the
  *    transmission and before releasing the CS line
+ * @param gpio_dt_flags is the devicetree flags corresponding to how the CS
+ *    line should be driven. GPIO_ACTIVE_LOW/GPIO_ACTIVE_HIGH should be
+ *    equivalent to SPI_CS_ACTIVE_HIGH/SPI_CS_ACTIVE_LOW options in struct
+ *    spi_config.
  */
 struct spi_cs_control {
 	struct device	*gpio_dev;
-	uint32_t		gpio_pin;
 	uint32_t		delay;
+	gpio_pin_t		gpio_pin;
+	gpio_dt_flags_t		gpio_dt_flags;
 };
 
 /**
@@ -303,7 +309,6 @@ static inline int spi_write(struct device *dev,
 	return spi_transceive(dev, config, tx_bufs, NULL);
 }
 
-#ifdef CONFIG_SPI_ASYNC
 /**
  * @brief Read/write the specified amount of data from the SPI driver.
  *
@@ -330,10 +335,20 @@ static inline int spi_transceive_async(struct device *dev,
 				       const struct spi_buf_set *rx_bufs,
 				       struct k_poll_signal *async)
 {
+#ifdef CONFIG_SPI_ASYNC
 	const struct spi_driver_api *api =
 		(const struct spi_driver_api *)dev->driver_api;
 
 	return api->transceive_async(dev, config, tx_bufs, rx_bufs, async);
+#else
+	ARG_UNUSED(dev);
+	ARG_UNUSED(config);
+	ARG_UNUSED(tx_bufs);
+	ARG_UNUSED(rx_bufs);
+	ARG_UNUSED(async);
+
+	return -ENOTSUP;
+#endif /* CONFIG_SPI_ASYNC */
 }
 
 /**
@@ -385,7 +400,6 @@ static inline int spi_write_async(struct device *dev,
 {
 	return spi_transceive_async(dev, config, tx_bufs, NULL, async);
 }
-#endif /* CONFIG_SPI_ASYNC */
 
 /**
  * @brief Release the SPI device locked on by the current config

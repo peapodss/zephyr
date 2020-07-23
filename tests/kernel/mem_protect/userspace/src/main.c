@@ -507,6 +507,10 @@ static void test_write_other_stack(void)
 /**
  * @brief Test to revoke access to kobject without permission
  *
+ * @details User thread can only revoke their own access to an object.
+ * In that test user thread to revokes access to unathorized object, as a result
+ * the system will assert.
+ *
  * @ingroup kernel_memprotect_tests
  */
 static void test_revoke_noperms_object(void)
@@ -555,10 +559,13 @@ static void umode_enter_func(void)
 }
 
 /**
- * @brief Test to check enter to usermode
- *
- * @ingroup kernel_memprotect_tests
- */
+* @brief Test to check supervisor thread enter one-way to usermode
+*
+* @details A thread running in supervisor mode must have one-way operation
+* ability to drop privileges to user mode.
+*
+* @ingroup kernel_memprotect_tests
+*/
 static void test_user_mode_enter(void)
 {
 	expect_fault = false;
@@ -709,8 +716,10 @@ static void test_domain_add_thread_drop_to_user(void)
 	k_thread_user_mode_enter(user_half, NULL, NULL, NULL);
 }
 
-/* Show that adding a partition to a domain and then dropping to user mode
- * works as expected.
+/* @brief Test adding application memory partition to memory domain
+ *
+ * @details Show that adding a partition to a domain and then dropping to user
+ * mode works as expected.
  *
  * @ingroup kernel_memprotect_tests
  */
@@ -752,7 +761,7 @@ static void test_domain_remove_thread_drop_to_user(void)
 }
 
 /**
- * Show that self-removing a partition from a domain we are a membed of,
+ * Show that self-removing a partition from a domain we are a member of,
  * and then dropping to user mode faults as expected.
  *
  * @ingroup kernel_memprotect_tests
@@ -1097,6 +1106,15 @@ void z_impl_missing_syscall(void)
 	k_panic();
 }
 
+/**
+ * @brief Test unimplemented system call
+ *
+ * @details Created a syscall with name missing_syscall() without a verification
+ * function. The kernel shall safety handle invocations of unimplemented system
+ * calls.
+ *
+ * @ingroup kernel_memprotect_tests
+ */
 void test_unimplemented_syscall(void)
 {
 	expect_fault = true;

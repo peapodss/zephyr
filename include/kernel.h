@@ -30,12 +30,6 @@ extern "C" {
  * @}
  */
 
-#ifdef CONFIG_KERNEL_DEBUG
-#define K_DEBUG(fmt, ...) printk("[%s]  " fmt, __func__, ##__VA_ARGS__)
-#else
-#define K_DEBUG(fmt, ...)
-#endif
-
 #if defined(CONFIG_COOP_ENABLED) && defined(CONFIG_PREEMPT_ENABLED)
 #define _NUM_COOP_PRIO (CONFIG_NUM_COOP_PRIORITIES)
 #define _NUM_PREEMPT_PRIO (CONFIG_NUM_PREEMPT_PRIORITIES + 1)
@@ -1779,8 +1773,8 @@ struct k_timer {
 	{ \
 	.timeout = { \
 		.node = {},\
+		.fn = z_timer_expiration_handler, \
 		.dticks = 0, \
-		.fn = z_timer_expiration_handler \
 	}, \
 	.wait_q = Z_WAIT_Q_INIT(&obj.wait_q), \
 	.expiry_fn = expiry, \
@@ -2773,7 +2767,7 @@ struct k_fifo {
  * @param name Name of the FIFO queue.
  */
 #define K_FIFO_DEFINE(name) \
-	Z_STRUCT_SECTION_ITERABLE(k_fifo, name) = \
+	Z_STRUCT_SECTION_ITERABLE_ALTERNATE(k_queue, k_fifo, name) = \
 		Z_FIFO_INITIALIZER(name)
 
 /** @} */
@@ -2854,7 +2848,7 @@ struct k_lifo {
 /**
  * @brief Get an element from a LIFO queue.
  *
- * This routine removes a data item from @a lifo in a "last in, first out"
+ * This routine removes a data item from @a LIFO in a "last in, first out"
  * manner. The first word of the data item is reserved for the kernel's use.
  *
  * @note Can be called by ISRs, but @a timeout must be set to K_NO_WAIT.
@@ -2879,7 +2873,7 @@ struct k_lifo {
  * @param name Name of the fifo.
  */
 #define K_LIFO_DEFINE(name) \
-	Z_STRUCT_SECTION_ITERABLE(k_lifo, name) = \
+	Z_STRUCT_SECTION_ITERABLE_ALTERNATE(k_queue, k_lifo, name) = \
 		Z_LIFO_INITIALIZER(name)
 
 /** @} */
@@ -3479,7 +3473,7 @@ extern void k_work_poll_init(struct k_work_poll *work,
  *
  * @param work_q Address of workqueue.
  * @param work Address of delayed work item.
- * @param events An array of pointers to events which trigger the work.
+ * @param events An array of events which trigger the work.
  * @param num_events The number of events in the array.
  * @param timeout Timeout after which the work will be scheduled
  *		  for execution even if not triggered.
@@ -3517,7 +3511,7 @@ extern int k_work_poll_submit_to_queue(struct k_work_q *work_q,
  * modified until the item has been processed by the workqueue.
  *
  * @param work Address of delayed work item.
- * @param events An array of pointers to events which trigger the work.
+ * @param events An array of events which trigger the work.
  * @param num_events The number of events in the array.
  * @param timeout Timeout after which the work will be scheduled
  *		  for execution even if not triggered.
@@ -4305,7 +4299,7 @@ struct k_pipe {
 	struct {
 		_wait_q_t      readers; /**< Reader wait queue */
 		_wait_q_t      writers; /**< Writer wait queue */
-	} wait_q;
+	} wait_q;			/** Wait queue */
 
 	_OBJECT_TRACING_NEXT_PTR(k_pipe)
 	_OBJECT_TRACING_LINKED_FLAG
@@ -4867,7 +4861,7 @@ enum _poll_types_bits {
 	/* semaphore availability */
 	_POLL_TYPE_SEM_AVAILABLE,
 
-	/* queue/fifo/lifo data availability */
+	/* queue/FIFO/LIFO data availability */
 	_POLL_TYPE_DATA_AVAILABLE,
 
 	_POLL_NUM_TYPES
@@ -4886,10 +4880,10 @@ enum _poll_states_bits {
 	/* semaphore is available */
 	_POLL_STATE_SEM_AVAILABLE,
 
-	/* data is available to read on queue/fifo/lifo */
+	/* data is available to read on queue/FIFO/LIFO */
 	_POLL_STATE_DATA_AVAILABLE,
 
-	/* queue/fifo/lifo wait was cancelled */
+	/* queue/FIFO/LIFO wait was cancelled */
 	_POLL_STATE_CANCELLED,
 
 	_POLL_NUM_STATES
@@ -5064,7 +5058,7 @@ extern void k_poll_event_init(struct k_poll_event *event, uint32_t type,
  * When called from user mode, a temporary memory allocation is required from
  * the caller's resource pool.
  *
- * @param events An array of pointers to events to be polled for.
+ * @param events An array of events to be polled for.
  * @param num_events The number of events in the array.
  * @param timeout Waiting period for an event to be ready,
  *                or one of the special values K_NO_WAIT and K_FOREVER.
