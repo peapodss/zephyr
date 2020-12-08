@@ -3,7 +3,7 @@
 zephyr_library()
 zephyr_library_link_libraries(subsys__bluetooth)
 
-zephyr_library_sources_ifdef(CONFIG_BT_HCI_RAW          hci_raw.c)
+zephyr_library_sources_ifdef(CONFIG_BT_HCI_RAW          hci_raw.c hci_common.c)
 zephyr_library_sources_ifdef(CONFIG_BT_DEBUG_MONITOR    monitor.c)
 zephyr_library_sources_ifdef(CONFIG_BT_TINYCRYPT_ECC    hci_ecc.c)
 zephyr_library_sources_ifdef(CONFIG_BT_A2DP             a2dp.c)
@@ -18,6 +18,7 @@ zephyr_library_sources_ifdef(
   keys_br.c
   l2cap_br.c
   sdp.c
+  ssp.c
   )
 
 zephyr_library_sources_ifdef(
@@ -29,7 +30,10 @@ zephyr_library_sources_ifdef(
 if(CONFIG_BT_HCI_HOST)
   zephyr_library_sources(
     uuid.c
+    addr.c
+    buf.c
     hci_core.c
+    hci_common.c
     )
   zephyr_library_sources_ifdef(
     CONFIG_BT_HOST_CRYPTO
@@ -54,6 +58,12 @@ if(CONFIG_BT_HCI_HOST)
         smp_null.c
         )
     endif()
+  endif()
+
+  if(CONFIG_BT_DF)
+    zephyr_library_sources(
+      direction.c
+      )
   endif()
 endif()
 
@@ -85,3 +95,5 @@ if(CONFIG_BT_CONN_DISABLE_SECURITY)
   Do not use in production."
     )
 endif()
+
+add_subdirectory_ifdef(CONFIG_BT_AUDIO audio)

@@ -13,18 +13,27 @@
 #include <device.h>
 #include <init.h>
 #include <soc.h>
+#include <stm32_ll_bus.h>
+#include <stm32_ll_pwr.h>
+#include <stm32_ll_rcc.h>
+#include <stm32_ll_system.h>
 #include <arch/cpu.h>
 #include <arch/arm/aarch32/cortex_m/cmsis.h>
 #include "stm32_hsem.h"
 
 #if defined(CONFIG_STM32H7_DUAL_CORE)
-static int stm32h7_m4_wakeup(struct device *arg)
+static int stm32h7_m4_wakeup(const struct device *arg)
 {
 
-	/*HW semaphore Clock enable*/
+	/* HW semaphore and SysCfg Clock enable */
 	LL_AHB4_GRP1_EnableClock(LL_AHB4_GRP1_PERIPH_HSEM);
+	LL_APB4_GRP1_EnableClock(LL_APB4_GRP1_PERIPH_SYSCFG);
 
-	if (IS_ENABLED(CONFIG_STM32H7_BOOT_CM4_CM7)) {
+	if (READ_BIT(SYSCFG->UR1, SYSCFG_UR1_BCM4)) {
+		/* CM4 is started at boot in parallel of CM7
+		 * but CM4 should set itself into stop mode,
+		 * waiting for CM7 clock initialization.
+		 */
 		int timeout;
 
 		/*
@@ -44,8 +53,8 @@ static int stm32h7_m4_wakeup(struct device *arg)
 		if (timeout < 0) {
 			return -EIO;
 		}
-	} else if (IS_ENABLED(CONFIG_STM32H7_BOOT_CM7_CM4GATED)) {
-		/* Start CM4 */
+	} else {
+		/* CM4 is not started at boot, start it now */
 		LL_RCC_ForceCM4Boot();
 	}
 
@@ -61,7 +70,7 @@ static int stm32h7_m4_wakeup(struct device *arg)
  *
  * @return 0
  */
-static int stm32h7_init(struct device *arg)
+static int stm32h7_init(const struct device *arg)
 {
 	uint32_t key;
 
