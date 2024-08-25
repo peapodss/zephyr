@@ -12,8 +12,10 @@
 
 #define DT_DRV_COMPAT gaisler_gptimer
 
-#include <drivers/timer/system_timer.h>
-#include <sys_clock.h>
+#include <zephyr/init.h>
+#include <zephyr/drivers/timer/system_timer.h>
+#include <zephyr/irq.h>
+#include <zephyr/sys_clock.h>
 
 /* GPTIMER subtimer increments each microsecond. */
 #define PRESCALER (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC / 1000000)
@@ -78,15 +80,15 @@ static void timer_isr(const void *unused)
 	tmr->ctrl = GPTIMER_CTRL_IE | GPTIMER_CTRL_RS |
 		    GPTIMER_CTRL_EN | gptimer_ctrl_clear_ip;
 
-	z_clock_announce(1);
+	sys_clock_announce(1);
 }
 
-uint32_t z_clock_elapsed(void)
+uint32_t sys_clock_elapsed(void)
 {
 	return 0;
 }
 
-uint32_t z_timer_cycle_get_32(void)
+uint32_t sys_clock_cycle_get_32(void)
 {
 	volatile struct gptimer_regs *regs = get_regs();
 	volatile struct gptimer_timer_regs *tmr = &regs->timer[1];
@@ -101,7 +103,7 @@ static void init_downcounter(volatile struct gptimer_timer_regs *tmr)
 	tmr->ctrl = GPTIMER_CTRL_LD | GPTIMER_CTRL_RS | GPTIMER_CTRL_EN;
 }
 
-int z_clock_driver_init(const struct device *device)
+static int sys_clock_driver_init(void)
 {
 	const int timer_interrupt = get_timer_irq();
 	volatile struct gptimer_regs *regs = get_regs();
@@ -126,3 +128,6 @@ int z_clock_driver_init(const struct device *device)
 	irq_enable(timer_interrupt);
 	return 0;
 }
+
+SYS_INIT(sys_clock_driver_init, PRE_KERNEL_2,
+	 CONFIG_SYSTEM_CLOCK_INIT_PRIORITY);

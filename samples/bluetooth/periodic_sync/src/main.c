@@ -4,16 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <device.h>
-#include <devicetree.h>
-#include <drivers/gpio.h>
-#include <bluetooth/bluetooth.h>
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/bluetooth/bluetooth.h>
 
 #define TIMEOUT_SYNC_CREATE K_SECONDS(10)
 #define NAME_LEN            30
 
 static bool         per_adv_found;
 static bt_addr_le_t per_addr;
+static uint32_t     per_adv_interval_ms;
 static uint8_t      per_sid;
 
 static K_SEM_DEFINE(sem_per_adv, 0, 1);
@@ -25,21 +26,18 @@ static K_SEM_DEFINE(sem_per_sync_lost, 0, 1);
 
 #if DT_NODE_HAS_STATUS(LED0_NODE, okay)
 #define HAS_LED     1
-#define LED0        DT_GPIO_LABEL(LED0_NODE, gpios)
-#define PIN         DT_GPIO_PIN(LED0_NODE, gpios)
-#define FLAGS       DT_GPIO_FLAGS(LED0_NODE, gpios)
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 #define BLINK_ONOFF K_MSEC(500)
 
-static struct device const   *dev;
-static struct k_delayed_work blink_work;
+static struct k_work_delayable blink_work;
 static bool                  led_is_on;
 
 static void blink_timeout(struct k_work *work)
 {
 	led_is_on = !led_is_on;
-	gpio_pin_set(dev, PIN, (int)led_is_on);
+	gpio_pin_set(led.port, led.pin, (int)led_is_on);
 
-	k_delayed_work_submit(&blink_work, BLINK_ONOFF);
+	k_work_schedule(&blink_work, BLINK_ONOFF);
 }
 #endif
 
@@ -81,6 +79,10 @@ static void scan_recv(const struct bt_le_scan_recv_info *info,
 
 	bt_data_parse(buf, data_cb, name);
 
+	if (strlen(CONFIG_PER_ADV_NAME) > 0 && strcmp(name, CONFIG_PER_ADV_NAME) != 0) {
+		return;
+	}
+
 	bt_addr_le_to_str(info->addr, le_addr, sizeof(le_addr));
 	printk("[DEVICE]: %s, AD evt type %u, Tx Pwr: %i, RSSI %i %s "
 	       "C:%u S:%u D:%u SR:%u E:%u Prim: %s, Secn: %s, "
@@ -96,6 +98,7 @@ static void scan_recv(const struct bt_le_scan_recv_info *info,
 
 	if (!per_adv_found && info->interval) {
 		per_adv_found = true;
+		per_adv_interval_ms = BT_GAP_PER_ADV_INTERVAL_TO_MS(info->interval);
 
 		per_sid = info->sid;
 		bt_addr_le_copy(&per_addr, info->addr);
@@ -158,7 +161,7 @@ static struct bt_le_per_adv_sync_cb sync_callbacks = {
 	.recv = recv_cb
 };
 
-void main(void)
+int main(void)
 {
 	struct bt_le_per_adv_sync_param sync_create_param;
 	struct bt_le_per_adv_sync *sync;
@@ -167,29 +170,29 @@ void main(void)
 	printk("Starting Periodic Advertising Synchronization Demo\n");
 
 #if defined(HAS_LED)
-	printk("Get reference to LED device...");
-	dev = device_get_binding(LED0);
-	if (!dev) {
-		printk("Failed.\n");
-		return;
+	printk("Checking LED device...");
+	if (!gpio_is_ready_dt(&led)) {
+		printk("failed.\n");
+		return 0;
 	}
 	printk("done.\n");
 
-	printk("Configure GPIO pin...");
-	err = gpio_pin_configure(dev, PIN, GPIO_OUTPUT_ACTIVE | FLAGS);
+	printk("Configuring GPIO pin...");
+	err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
 	if (err) {
-		return;
+		printk("failed.\n");
+		return 0;
 	}
 	printk("done.\n");
 
-	k_delayed_work_init(&blink_work, blink_timeout);
+	k_work_init_delayable(&blink_work, blink_timeout);
 #endif /* HAS_LED */
 
 	/* Initialize the Bluetooth Subsystem */
 	err = bt_enable(NULL);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
-		return;
+		return 0;
 	}
 
 	printk("Scan callbacks register...");
@@ -204,16 +207,18 @@ void main(void)
 	err = bt_le_scan_start(BT_LE_SCAN_ACTIVE, NULL);
 	if (err) {
 		printk("failed (err %d)\n", err);
-		return;
+		return 0;
 	}
 	printk("success.\n");
 
 	do {
 #if defined(HAS_LED)
+		struct k_work_sync work_sync;
+
 		printk("Start blinking LED...\n");
 		led_is_on = false;
-		gpio_pin_set(dev, PIN, (int)led_is_on);
-		k_delayed_work_submit(&blink_work, BLINK_ONOFF);
+		gpio_pin_set(led.port, led.pin, (int)led_is_on);
+		k_work_schedule(&blink_work, BLINK_ONOFF);
 #endif /* HAS_LED */
 
 		printk("Waiting for periodic advertising...\n");
@@ -221,7 +226,7 @@ void main(void)
 		err = k_sem_take(&sem_per_adv, K_FOREVER);
 		if (err) {
 			printk("failed (err %d)\n", err);
-			return;
+			return 0;
 		}
 		printk("Found periodic advertising.\n");
 
@@ -230,11 +235,11 @@ void main(void)
 		sync_create_param.options = 0;
 		sync_create_param.sid = per_sid;
 		sync_create_param.skip = 0;
-		sync_create_param.timeout = 0xa;
+		sync_create_param.timeout = per_adv_interval_ms * 10 / 10; /* 10 attempts */
 		err = bt_le_per_adv_sync_create(&sync_create_param, &sync);
 		if (err) {
 			printk("failed (err %d)\n", err);
-			return;
+			return 0;
 		}
 		printk("success.\n");
 
@@ -247,7 +252,7 @@ void main(void)
 			err = bt_le_per_adv_sync_delete(sync);
 			if (err) {
 				printk("failed (err %d)\n", err);
-				return;
+				return 0;
 			}
 			continue;
 		}
@@ -255,18 +260,18 @@ void main(void)
 
 #if defined(HAS_LED)
 		printk("Stop blinking LED.\n");
-		k_delayed_work_cancel(&blink_work);
+		k_work_cancel_delayable_sync(&blink_work, &work_sync);
 
 		/* Keep LED on */
 		led_is_on = true;
-		gpio_pin_set(dev, PIN, (int)led_is_on);
+		gpio_pin_set(led.port, led.pin, (int)led_is_on);
 #endif /* HAS_LED */
 
 		printk("Waiting for periodic sync lost...\n");
 		err = k_sem_take(&sem_per_sync_lost, K_FOREVER);
 		if (err) {
 			printk("failed (err %d)\n", err);
-			return;
+			return 0;
 		}
 		printk("Periodic sync lost.\n");
 	} while (true);

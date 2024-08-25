@@ -11,26 +11,29 @@
  * Core thread related primitives for the ARCv2 processor architecture.
  */
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 #include <ksched.h>
 #include <offsets_short.h>
-#include <wait_q.h>
 
 #ifdef CONFIG_USERSPACE
-#include <arch/arc/v2/mpu/arc_core_mpu.h>
+#include <zephyr/arch/arc/v2/mpu/arc_core_mpu.h>
 #endif
 
+#if defined(CONFIG_ARC_DSP) && defined(CONFIG_DSP_SHARING)
+#include <zephyr/arch/arc/v2/dsp/arc_dsp.h>
+static struct k_spinlock lock;
+#endif
 /*  initial stack frame */
 struct init_stack_frame {
-	uint32_t pc;
+	uintptr_t pc;
 #ifdef CONFIG_ARC_HAS_SECURE
 	uint32_t sec_stat;
 #endif
-	uint32_t status32;
-	uint32_t r3;
-	uint32_t r2;
-	uint32_t r1;
-	uint32_t r0;
+	uintptr_t status32;
+	uintptr_t r3;
+	uintptr_t r2;
+	uintptr_t r1;
+	uintptr_t r0;
 };
 
 #ifdef CONFIG_USERSPACE
@@ -121,9 +124,19 @@ static inline void arch_setup_callee_saved_regs(struct k_thread *thread,
 
 	ARG_UNUSED(regs);
 
-#ifdef CONFIG_THREAD_LOCAL_STORAGE
-	/* R26 is used for thread pointer */
-	regs->r26 = thread->tls;
+/* GCC uses tls pointer cached in register, MWDT just call for _mwget_tls */
+#if defined(CONFIG_THREAD_LOCAL_STORAGE) && !defined(__CCAC__)
+#ifdef CONFIG_ISA_ARCV2
+#if __ARC_TLS_REGNO__ <= 0
+#error Compiler not configured for thread local storage
+#endif
+#define TLSREG _CONCAT(r, __ARC_TLS_REGNO__)
+	/* __ARC_TLS_REGNO__ is used for thread pointer for ARCv2 */
+	regs->TLSREG = thread->tls;
+#else
+	/* R30 is used for thread pointer for ARCv3 */
+	regs->r30 = thread->tls;
+#endif /* CONFIG_ISA_ARCV2 */
 #endif
 }
 
@@ -150,23 +163,23 @@ void arch_new_thread(struct k_thread *thread, k_thread_stack_t *stack,
 	 * level/mask can't be set from user space that's not worse than
 	 * executing a loop without yielding.
 	 */
-	iframe->status32 = _ARC_V2_STATUS32_US;
+	iframe->status32 = _ARC_V2_STATUS32_US | _ARC_V2_STATUS32_DZ;
 	if (is_user(thread)) {
 		iframe->pc = (uint32_t)z_user_thread_entry_wrapper;
 	} else {
 		iframe->pc = (uint32_t)z_thread_entry_wrapper;
 	}
 #else
-	iframe->status32 = 0;
-	iframe->pc = ((uint32_t)z_thread_entry_wrapper);
+	iframe->status32 = _ARC_V2_STATUS32_DZ;
+	iframe->pc = ((uintptr_t)z_thread_entry_wrapper);
 #endif /* CONFIG_USERSPACE */
 #ifdef CONFIG_ARC_SECURE_FIRMWARE
 	iframe->sec_stat = z_arc_v2_aux_reg_read(_ARC_V2_SEC_STAT);
 #endif
-	iframe->r0 = (uint32_t)entry;
-	iframe->r1 = (uint32_t)p1;
-	iframe->r2 = (uint32_t)p2;
-	iframe->r3 = (uint32_t)p3;
+	iframe->r0 = (uintptr_t)entry;
+	iframe->r1 = (uintptr_t)p1;
+	iframe->r2 = (uintptr_t)p2;
+	iframe->r3 = (uintptr_t)p3;
 
 #ifdef CONFIG_ARC_STACK_CHECKING
 #ifdef CONFIG_ARC_SECURE_FIRMWARE
@@ -182,19 +195,28 @@ void arch_new_thread(struct k_thread *thread, k_thread_stack_t *stack,
 	thread->switch_handle = thread;
 	thread->arch.relinquish_cause = _CAUSE_COOP;
 	thread->callee_saved.sp =
-		(uint32_t)iframe - ___callee_saved_stack_t_SIZEOF;
+		(uintptr_t)iframe - ___callee_saved_stack_t_SIZEOF;
 
 	arch_setup_callee_saved_regs(thread, thread->callee_saved.sp);
 
 	/* initial values in all other regs/k_thread entries are irrelevant */
 }
 
+#ifdef CONFIG_MULTITHREADING
 void *z_arch_get_next_switch_handle(struct k_thread **old_thread)
 {
 	*old_thread =  _current;
 
-	return z_get_next_switch_handle(*old_thread);
+	return z_get_next_switch_handle(NULL);
 }
+#else
+void *z_arch_get_next_switch_handle(struct k_thread **old_thread)
+{
+	ARG_UNUSED(old_thread);
+
+	return NULL;
+}
+#endif
 
 #ifdef CONFIG_USERSPACE
 FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
@@ -232,7 +254,7 @@ int arch_float_disable(struct k_thread *thread)
 }
 
 
-int arch_float_enable(struct k_thread *thread)
+int arch_float_enable(struct k_thread *thread, unsigned int options)
 {
 	unsigned int key;
 
@@ -248,3 +270,53 @@ int arch_float_enable(struct k_thread *thread)
 	return 0;
 }
 #endif /* CONFIG_FPU && CONFIG_FPU_SHARING */
+
+#if !defined(CONFIG_MULTITHREADING)
+
+K_KERNEL_STACK_ARRAY_DECLARE(z_interrupt_stacks, CONFIG_MP_MAX_NUM_CPUS, CONFIG_ISR_STACK_SIZE);
+K_THREAD_STACK_DECLARE(z_main_stack, CONFIG_MAIN_STACK_SIZE);
+
+extern void z_main_no_multithreading_entry_wrapper(void *p1, void *p2, void *p3,
+						   void *main_stack, void *main_entry);
+
+FUNC_NORETURN void z_arc_switch_to_main_no_multithreading(k_thread_entry_t main_entry,
+							  void *p1, void *p2, void *p3)
+{
+	_kernel.cpus[0].id = 0;
+	_kernel.cpus[0].irq_stack = (K_KERNEL_STACK_BUFFER(z_interrupt_stacks[0]) +
+				     K_KERNEL_STACK_SIZEOF(z_interrupt_stacks[0]));
+
+	void *main_stack = (K_THREAD_STACK_BUFFER(z_main_stack) +
+			    K_THREAD_STACK_SIZEOF(z_main_stack));
+
+	arch_irq_unlock(_ARC_V2_INIT_IRQ_LOCK_KEY);
+
+	z_main_no_multithreading_entry_wrapper(p1, p2, p3, main_stack, main_entry);
+
+	CODE_UNREACHABLE; /* LCOV_EXCL_LINE */
+}
+#endif /* !CONFIG_MULTITHREADING */
+
+#if defined(CONFIG_ARC_DSP) && defined(CONFIG_DSP_SHARING)
+void arc_dsp_disable(struct k_thread *thread, unsigned int options)
+{
+	/* Ensure a preemptive context switch does not occur */
+	k_spinlock_key_t key = k_spin_lock(&lock);
+
+	/* Disable DSP or AGU capabilities for the thread */
+	thread->base.user_options &= ~(uint8_t)options;
+
+	k_spin_unlock(&lock, key);
+}
+
+void arc_dsp_enable(struct k_thread *thread, unsigned int options)
+{
+	/* Ensure a preemptive context switch does not occur */
+	k_spinlock_key_t key = k_spin_lock(&lock);
+
+	/* Enable dsp or agu capabilities for the thread */
+	thread->base.user_options |= (uint8_t)options;
+
+	k_spin_unlock(&lock, key);
+}
+#endif /* CONFIG_ARC_DSP && CONFIG_DSP_SHARING */

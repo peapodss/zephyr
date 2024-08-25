@@ -1,36 +1,33 @@
 /*
- * Copyright (c) 2018-2020 O.S.Systems
+ * Copyright (c) 2018-2023 O.S.Systems
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(updatehub, CONFIG_UPDATEHUB_LOG_LEVEL);
 
-#include <zephyr.h>
+#include <zephyr/logging/log_ctrl.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_ip.h>
+#include <zephyr/net/udp.h>
+#include <zephyr/net/coap.h>
+#include <zephyr/net/dns_resolve.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/data/json.h>
+#include <zephyr/mgmt/updatehub.h>
 
-#include <logging/log_ctrl.h>
-#include <net/socket.h>
-#include <net/net_mgmt.h>
-#include <net/net_ip.h>
-#include <net/udp.h>
-#include <net/coap.h>
-#include <net/dns_resolve.h>
-#include <drivers/flash.h>
-#include <power/reboot.h>
-#include <tinycrypt/sha256.h>
-#include <data/json.h>
-#include <storage/flash_map.h>
-
-#include "include/updatehub.h"
 #include "updatehub_priv.h"
 #include "updatehub_firmware.h"
 #include "updatehub_device.h"
 #include "updatehub_timer.h"
+#include "updatehub_integrity.h"
+#include "updatehub_storage.h"
 
 #if defined(CONFIG_UPDATEHUB_DTLS)
 #define CA_CERTIFICATE_TAG 1
-#include <net/tls_credentials.h>
+#include <zephyr/net/tls_credentials.h>
 #endif
 
 #define NETWORK_TIMEOUT (2 * MSEC_PER_SEC)
@@ -45,25 +42,32 @@ LOG_MODULE_REGISTER(updatehub, CONFIG_UPDATEHUB_LOG_LEVEL);
 #define MAX_DOWNLOAD_DATA (MAX_PAYLOAD_SIZE + 32)
 #define MAX_IP_SIZE 30
 
-#define SHA256_HEX_DIGEST_SIZE	((TC_SHA256_DIGEST_SIZE * 2) + 1)
-
 #if defined(CONFIG_UPDATEHUB_CE)
 #define UPDATEHUB_SERVER CONFIG_UPDATEHUB_SERVER
 #else
 #define UPDATEHUB_SERVER "coap.updatehub.io"
 #endif
 
+#ifdef CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION
+#define _DOWNLOAD_SHA256_VERIFICATION
+#elif defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
+#define _DOWNLOAD_SHA256_VERIFICATION
+#define _STORAGE_SHA256_VERIFICATION
+#elif defined(CONFIG_UPDATEHUB_STORAGE_SHA256_VERIFICATION)
+#define _STORAGE_SHA256_VERIFICATION
+#endif
+
 static struct updatehub_context {
 	struct coap_block_context block;
 	struct k_sem semaphore;
-	struct flash_img_context flash_ctx;
-	struct tc_sha256_state_struct sha256sum;
+	struct updatehub_storage_context storage_ctx;
+	updatehub_crypto_context_t crypto_ctx;
 	enum updatehub_response code_status;
-	uint8_t hash[TC_SHA256_DIGEST_SIZE];
+	uint8_t hash[SHA256_BIN_DIGEST_SIZE];
 	uint8_t uri_path[MAX_PATH_SIZE];
 	uint8_t payload[MAX_PAYLOAD_SIZE];
 	int downloaded_size;
-	struct pollfd fds[1];
+	struct zsock_pollfd fds[1];
 	int sock;
 	int nfds;
 } ctx;
@@ -74,7 +78,7 @@ static struct update_info {
 	int image_size;
 } update_info;
 
-static struct k_delayed_work updatehub_work_handle;
+static struct k_work_delayable updatehub_work_handle;
 
 static int bin2hex_str(uint8_t *bin, size_t bin_len, char *str, size_t str_buf_len)
 {
@@ -88,15 +92,14 @@ static int bin2hex_str(uint8_t *bin, size_t bin_len, char *str, size_t str_buf_l
 	}
 
 	memset(str, 0, str_buf_len);
-	/* str_buf_len - 1 ensure space for \0 */
-	bin2hex(bin, bin_len, str, str_buf_len - 1);
+	bin2hex(bin, bin_len, str, str_buf_len);
 
 	return 0;
 }
 
 static void wait_fds(void)
 {
-	if (poll(ctx.fds, ctx.nfds, NETWORK_TIMEOUT) < 0) {
+	if (zsock_poll(ctx.fds, ctx.nfds, NETWORK_TIMEOUT) < 0) {
 		LOG_ERR("Error in poll");
 	}
 }
@@ -104,27 +107,27 @@ static void wait_fds(void)
 static void prepare_fds(void)
 {
 	ctx.fds[ctx.nfds].fd = ctx.sock;
-	ctx.fds[ctx.nfds].events = POLLIN;
+	ctx.fds[ctx.nfds].events = ZSOCK_POLLIN;
 	ctx.nfds++;
 }
 
 static int metadata_hash_get(char *metadata)
 {
-	struct tc_sha256_state_struct sha256sum;
+	updatehub_crypto_context_t local_crypto_ctx;
 
-	if (tc_sha256_init(&sha256sum) == 0) {
+	if (updatehub_integrity_init(&local_crypto_ctx)) {
 		return -1;
 	}
 
-	if (tc_sha256_update(&sha256sum, metadata, strlen(metadata)) == 0) {
+	if (updatehub_integrity_update(&local_crypto_ctx, metadata, strlen(metadata))) {
 		return -1;
 	}
 
-	if (tc_sha256_final(ctx.hash, &sha256sum) == 0) {
+	if (updatehub_integrity_finish(&local_crypto_ctx, ctx.hash, sizeof(ctx.hash))) {
 		return -1;
 	}
 
-	if (bin2hex_str(ctx.hash, TC_SHA256_DIGEST_SIZE,
+	if (bin2hex_str(ctx.hash, SHA256_BIN_DIGEST_SIZE,
 		update_info.package_uid, SHA256_HEX_DIGEST_SIZE)) {
 		return -1;
 	}
@@ -150,7 +153,7 @@ static void cleanup_connection(void)
 {
 	int i;
 
-	if (close(ctx.sock) < 0) {
+	if (zsock_close(ctx.sock) < 0) {
 		LOG_ERR("Could not close the socket");
 	}
 
@@ -164,8 +167,8 @@ static void cleanup_connection(void)
 
 static bool start_coap_client(void)
 {
-	struct addrinfo *addr;
-	struct addrinfo hints;
+	struct zsock_addrinfo *addr;
+	struct zsock_addrinfo hints;
 	int resolve_attempts = 10;
 	int ret = -1;
 
@@ -190,7 +193,7 @@ static bool start_coap_client(void)
 #endif
 
 	while (resolve_attempts--) {
-		ret = getaddrinfo(UPDATEHUB_SERVER, port, &hints, &addr);
+		ret = zsock_getaddrinfo(UPDATEHUB_SERVER, port, &hints, &addr);
 		if (ret == 0) {
 			break;
 		}
@@ -203,7 +206,7 @@ static bool start_coap_client(void)
 
 	ret = 1;
 
-	ctx.sock = socket(addr->ai_family, SOCK_DGRAM, protocol);
+	ctx.sock = zsock_socket(addr->ai_family, SOCK_DGRAM, protocol);
 	if (ctx.sock < 0) {
 		LOG_ERR("Failed to create UDP socket");
 		goto error;
@@ -212,19 +215,19 @@ static bool start_coap_client(void)
 	ret = -1;
 
 #if defined(CONFIG_UPDATEHUB_DTLS)
-	if (setsockopt(ctx.sock, SOL_TLS, TLS_SEC_TAG_LIST,
-		       sec_list, sizeof(sec_list)) < 0) {
+	if (zsock_setsockopt(ctx.sock, SOL_TLS, TLS_SEC_TAG_LIST,
+			     sec_list, sizeof(sec_list)) < 0) {
 		LOG_ERR("Failed to set TLS_TAG option");
 		goto error;
 	}
 
-	if (setsockopt(ctx.sock, SOL_TLS, TLS_PEER_VERIFY, &verify, sizeof(int)) < 0) {
+	if (zsock_setsockopt(ctx.sock, SOL_TLS, TLS_PEER_VERIFY, &verify, sizeof(int)) < 0) {
 		LOG_ERR("Failed to set TLS_PEER_VERIFY option");
 		goto error;
 	}
 #endif
 
-	if (connect(ctx.sock, addr->ai_addr, addr->ai_addrlen) < 0) {
+	if (zsock_connect(ctx.sock, addr->ai_addr, addr->ai_addrlen) < 0) {
 		LOG_ERR("Cannot connect to UDP remote");
 		goto error;
 	}
@@ -233,7 +236,7 @@ static bool start_coap_client(void)
 
 	ret = 0;
 error:
-	freeaddrinfo(addr);
+	zsock_freeaddrinfo(addr);
 
 	if (ret > 0) {
 		cleanup_connection();
@@ -247,7 +250,6 @@ static int send_request(enum coap_msgtype msgtype, enum coap_method method,
 {
 	struct coap_packet request_packet;
 	int ret = -1;
-	uint8_t content_application_json = 50;
 	uint8_t *data = k_malloc(MAX_PAYLOAD_SIZE);
 
 	if (data == NULL) {
@@ -255,8 +257,9 @@ static int send_request(enum coap_msgtype msgtype, enum coap_method method,
 		goto error;
 	}
 
-	ret = coap_packet_init(&request_packet, data, MAX_PAYLOAD_SIZE, 1,
-			       COAP_TYPE_CON, 8, coap_next_token(), method,
+	ret = coap_packet_init(&request_packet, data, MAX_PAYLOAD_SIZE,
+			       COAP_VERSION_1, COAP_TYPE_CON,
+			       COAP_TOKEN_MAX_LEN, coap_next_token(), method,
 			       coap_next_id());
 	if (ret < 0) {
 		LOG_ERR("Could not init packet");
@@ -305,10 +308,9 @@ static int send_request(enum coap_msgtype msgtype, enum coap_method method,
 			goto error;
 		}
 
-		ret = coap_packet_append_option(&request_packet,
-						COAP_OPTION_CONTENT_FORMAT,
-						&content_application_json,
-						sizeof(content_application_json));
+		ret = coap_append_option_int(&request_packet,
+					     COAP_OPTION_CONTENT_FORMAT,
+					     COAP_CONTENT_FORMAT_APP_JSON);
 		if (ret < 0) {
 			LOG_ERR("Unable add option to request format");
 			goto error;
@@ -343,7 +345,7 @@ static int send_request(enum coap_msgtype msgtype, enum coap_method method,
 		goto error;
 	}
 
-	ret = send(ctx.sock, request_packet.data, request_packet.offset, 0);
+	ret = zsock_send(ctx.sock, request_packet.data, request_packet.offset, 0);
 	if (ret < 0) {
 		LOG_ERR("Could not send request");
 		goto error;
@@ -355,18 +357,17 @@ error:
 	return ret;
 }
 
-#if defined(CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
+#ifdef _DOWNLOAD_SHA256_VERIFICATION
 static bool install_update_cb_sha256(void)
 {
 	char sha256[SHA256_HEX_DIGEST_SIZE];
 
-	if (tc_sha256_final(ctx.hash, &ctx.sha256sum) < 1) {
+	if (updatehub_integrity_finish(&ctx.crypto_ctx, ctx.hash, sizeof(ctx.hash))) {
 		LOG_ERR("Could not finish sha256sum");
 		return false;
 	}
 
-	if (bin2hex_str(ctx.hash, TC_SHA256_DIGEST_SIZE,
+	if (bin2hex_str(ctx.hash, SHA256_BIN_DIGEST_SIZE,
 		sha256, SHA256_HEX_DIGEST_SIZE)) {
 		LOG_ERR("Could not create sha256sum hex representation");
 		return false;
@@ -383,14 +384,16 @@ static bool install_update_cb_sha256(void)
 }
 #endif
 
-static int install_update_cb_check_blk_num(struct coap_packet *resp)
+static int install_update_cb_check_blk_num(const struct coap_packet *resp)
 {
 	int blk_num;
 	int blk2_opt;
+	uint16_t payload_len;
 
 	blk2_opt = coap_get_option_int(resp, COAP_OPTION_BLOCK2);
+	(void)coap_packet_get_payload(resp, &payload_len);
 
-	if ((resp->max_len - resp->offset) <= 0 || (blk2_opt < 0)) {
+	if ((payload_len == 0) || (blk2_opt < 0)) {
 		LOG_DBG("Invalid data received or block number is < 0");
 		return -ENOENT;
 	}
@@ -409,11 +412,9 @@ static int install_update_cb_check_blk_num(struct coap_packet *resp)
 static void install_update_cb(void)
 {
 	struct coap_packet response_packet;
-#if defined(CONFIG_UPDATEHUB_STORAGE_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
-	struct flash_img_check fic;
-#endif
 	uint8_t *data = k_malloc(MAX_DOWNLOAD_DATA);
+	const uint8_t *payload_start;
+	uint16_t payload_len;
 	int rcvd = -1;
 
 	if (data == NULL) {
@@ -424,7 +425,7 @@ static void install_update_cb(void)
 
 	wait_fds();
 
-	rcvd = recv(ctx.sock, data, MAX_DOWNLOAD_DATA, MSG_DONTWAIT);
+	rcvd = zsock_recv(ctx.sock, data, MAX_DOWNLOAD_DATA, ZSOCK_MSG_DONTWAIT);
 	if (rcvd <= 0) {
 		ctx.code_status = UPDATEHUB_NETWORKING_ERROR;
 		LOG_ERR("Could not receive data");
@@ -442,28 +443,27 @@ static void install_update_cb(void)
 		goto cleanup;
 	}
 
+	/* payload_len is > 0, checked at install_update_cb_check_blk_num */
+	payload_start = coap_packet_get_payload(&response_packet, &payload_len);
+
 	updatehub_tmr_stop();
 	updatehub_blk_set(UPDATEHUB_BLK_ATTEMPT, 0);
 	updatehub_blk_set(UPDATEHUB_BLK_TX_AVAILABLE, 1);
 
-	ctx.downloaded_size = ctx.downloaded_size +
-			      (response_packet.max_len - response_packet.offset);
+	ctx.downloaded_size = ctx.downloaded_size + payload_len;
 
-#if defined(CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
-	if (tc_sha256_update(&ctx.sha256sum,
-			     response_packet.data + response_packet.offset,
-			     response_packet.max_len - response_packet.offset) < 1) {
+#ifdef _DOWNLOAD_SHA256_VERIFICATION
+	if (updatehub_integrity_update(&ctx.crypto_ctx,
+			     payload_start,
+			     payload_len)) {
 		LOG_ERR("Could not update sha256sum");
 		ctx.code_status = UPDATEHUB_DOWNLOAD_ERROR;
 		goto cleanup;
 	}
 #endif
 
-	if (flash_img_buffered_write(&ctx.flash_ctx,
-				     response_packet.data + response_packet.offset,
-				     response_packet.max_len - response_packet.offset,
-				     ctx.downloaded_size == ctx.block.total_size) < 0) {
+	if (updatehub_storage_write(&ctx.storage_ctx, payload_start, payload_len,
+				    ctx.downloaded_size == ctx.block.total_size)) {
 		LOG_ERR("Error to write on the flash");
 		ctx.code_status = UPDATEHUB_INSTALL_ERROR;
 		goto cleanup;
@@ -483,8 +483,7 @@ static void install_update_cb(void)
 
 		LOG_INF("Firmware download complete");
 
-#if defined(CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
+#ifdef _DOWNLOAD_SHA256_VERIFICATION
 		if (!install_update_cb_sha256()) {
 			LOG_ERR("Firmware - download validation has failed");
 			ctx.code_status = UPDATEHUB_DOWNLOAD_ERROR;
@@ -493,20 +492,17 @@ static void install_update_cb(void)
 #else
 		if (hex2bin(update_info.sha256sum_image,
 			    SHA256_HEX_DIGEST_SIZE - 1, ctx.hash,
-			    TC_SHA256_DIGEST_SIZE) != TC_SHA256_DIGEST_SIZE) {
+			    SHA256_BIN_DIGEST_SIZE) != SHA256_BIN_DIGEST_SIZE) {
 			LOG_ERR("Firmware - metadata validation has failed");
 			ctx.code_status = UPDATEHUB_DOWNLOAD_ERROR;
 			goto cleanup;
 		}
 #endif
 
-#if defined(CONFIG_UPDATEHUB_STORAGE_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
-		fic.match = ctx.hash;
-		fic.clen = ctx.downloaded_size;
-
-		if (flash_img_check(&ctx.flash_ctx, &fic,
-				    FLASH_AREA_ID(image_1))) {
+#ifdef _STORAGE_SHA256_VERIFICATION
+		if (updatehub_storage_check(&ctx.storage_ctx,
+					    UPDATEHUB_SLOT_PARTITION_1,
+					    ctx.hash, ctx.downloaded_size)) {
 			LOG_ERR("Firmware - flash validation has failed");
 			ctx.code_status = UPDATEHUB_INSTALL_ERROR;
 			goto cleanup;
@@ -522,15 +518,8 @@ cleanup:
 
 static enum updatehub_response install_update(void)
 {
-	if (boot_erase_img_bank(FLASH_AREA_ID(image_1)) != 0) {
-		LOG_ERR("Failed to init flash and erase second slot");
-		ctx.code_status = UPDATEHUB_FLASH_INIT_ERROR;
-		goto error;
-	}
-
-#if defined(CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION) || \
-	defined(CONFIG_UPDATEHUB_DOWNLOAD_STORAGE_SHA256_VERIFICATION)
-	if (tc_sha256_init(&ctx.sha256sum) < 1) {
+#ifdef _DOWNLOAD_SHA256_VERIFICATION
+	if (updatehub_integrity_init(&ctx.crypto_ctx)) {
 		LOG_ERR("Could not start sha256sum");
 		ctx.code_status = UPDATEHUB_DOWNLOAD_ERROR;
 		goto error;
@@ -550,7 +539,8 @@ static enum updatehub_response install_update(void)
 		goto cleanup;
 	}
 
-	if (flash_img_init(&ctx.flash_ctx)) {
+	if (updatehub_storage_init(&ctx.storage_ctx,
+				   UPDATEHUB_SLOT_PARTITION_1)) {
 		LOG_ERR("Unable init flash");
 		ctx.code_status = UPDATEHUB_FLASH_INIT_ERROR;
 		goto cleanup;
@@ -611,7 +601,7 @@ static int report(enum updatehub_state state)
 	int ret = -1;
 	const char *exec = state_name(state);
 	char *device_id = k_malloc(DEVICE_ID_HEX_MAX_SIZE);
-	char *firmware_version = k_malloc(BOOT_IMG_VER_STRLEN_MAX);
+	char *firmware_version = k_malloc(FIRMWARE_IMG_VER_STRLEN_MAX);
 
 	if (device_id == NULL || firmware_version == NULL) {
 		LOG_ERR("Could not alloc device_id or firmware_version memory");
@@ -622,7 +612,9 @@ static int report(enum updatehub_state state)
 		goto error;
 	}
 
-	if (!updatehub_get_firmware_version(firmware_version, BOOT_IMG_VER_STRLEN_MAX)) {
+	if (!updatehub_get_firmware_version(UPDATEHUB_SLOT_PARTITION_0,
+					    firmware_version,
+					    FIRMWARE_IMG_VER_STRLEN_MAX)) {
 		goto error;
 	}
 
@@ -694,12 +686,14 @@ static void probe_cb(char *metadata, size_t metadata_size)
 {
 	struct coap_packet reply;
 	char tmp[MAX_DOWNLOAD_DATA];
+	const uint8_t *payload_start;
+	uint16_t payload_len;
 	size_t tmp_len;
 	int rcvd = -1;
 
 	wait_fds();
 
-	rcvd = recv(ctx.sock, tmp, MAX_DOWNLOAD_DATA, MSG_DONTWAIT);
+	rcvd = zsock_recv(ctx.sock, tmp, MAX_DOWNLOAD_DATA, ZSOCK_MSG_DONTWAIT);
 	if (rcvd <= 0) {
 		LOG_ERR("Could not receive data");
 		ctx.code_status = UPDATEHUB_NETWORKING_ERROR;
@@ -712,22 +706,27 @@ static void probe_cb(char *metadata, size_t metadata_size)
 		return;
 	}
 
-	if (COAP_RESPONSE_CODE_NOT_FOUND == coap_header_get_code(&reply)) {
+	if (coap_header_get_code(&reply) == COAP_RESPONSE_CODE_NOT_FOUND) {
 		LOG_INF("No update available");
 		ctx.code_status = UPDATEHUB_NO_UPDATE;
 		return;
 	}
 
-	/* check if we have buffer space to receive payload */
-	if (metadata_size < (reply.max_len - reply.offset)) {
+	payload_start = coap_packet_get_payload(&reply, &payload_len);
+	if (payload_len == 0) {
+		LOG_ERR("Invalid payload received");
+		ctx.code_status = UPDATEHUB_DOWNLOAD_ERROR;
+		return;
+	}
+
+	if (metadata_size < payload_len) {
 		LOG_ERR("There is no buffer available");
 		ctx.code_status = UPDATEHUB_METADATA_ERROR;
 		return;
 	}
 
 	memset(metadata, 0, metadata_size);
-	memcpy(metadata, reply.data + reply.offset,
-	       reply.max_len - reply.offset);
+	memcpy(metadata, payload_start, payload_len);
 
 	/* ensures payload have a valid string with size lower
 	 * than metadata_size
@@ -744,7 +743,19 @@ static void probe_cb(char *metadata, size_t metadata_size)
 	LOG_INF("Probe metadata received");
 }
 
-enum updatehub_response updatehub_probe(void)
+int z_impl_updatehub_confirm(void)
+{
+	return updatehub_storage_mark_partition_as_confirmed(UPDATEHUB_SLOT_PARTITION_0);
+}
+
+int z_impl_updatehub_reboot(void)
+{
+	sys_reboot(SYS_REBOOT_WARM);
+
+	return 0;
+}
+
+enum updatehub_response z_impl_updatehub_probe(void)
 {
 	struct probe request;
 	struct resp_probe_some_boards metadata_some_boards = { 0 };
@@ -753,7 +764,7 @@ enum updatehub_response updatehub_probe(void)
 	char *metadata = k_malloc(MAX_DOWNLOAD_DATA);
 	char *metadata_copy = k_malloc(MAX_DOWNLOAD_DATA);
 	char *device_id = k_malloc(DEVICE_ID_HEX_MAX_SIZE);
-	char *firmware_version = k_malloc(BOOT_IMG_VER_STRLEN_MAX);
+	char *firmware_version = k_malloc(FIRMWARE_IMG_VER_STRLEN_MAX);
 
 	size_t sha256size;
 
@@ -764,13 +775,15 @@ enum updatehub_response updatehub_probe(void)
 		goto error;
 	}
 
-	if (!boot_is_img_confirmed()) {
+	if (!updatehub_storage_is_partition_good(&ctx.storage_ctx)) {
 		LOG_ERR("The current image is not confirmed");
 		ctx.code_status = UPDATEHUB_UNCONFIRMED_IMAGE;
 		goto error;
 	}
 
-	if (!updatehub_get_firmware_version(firmware_version, BOOT_IMG_VER_STRLEN_MAX)) {
+	if (!updatehub_get_firmware_version(UPDATEHUB_SLOT_PARTITION_0,
+					    firmware_version,
+					    FIRMWARE_IMG_VER_STRLEN_MAX)) {
 		ctx.code_status = UPDATEHUB_METADATA_ERROR;
 		goto error;
 	}
@@ -834,19 +847,31 @@ enum updatehub_response updatehub_probe(void)
 				   recv_probe_sh_string_descr,
 				   ARRAY_SIZE(recv_probe_sh_string_descr),
 				   &metadata_any_boards) < 0) {
-			LOG_ERR("Could not parse json");
+			LOG_ERR("Could not parse the json");
 			ctx.code_status = UPDATEHUB_METADATA_ERROR;
 			goto cleanup;
 		}
 
+		LOG_DBG("elements: %d", metadata_any_boards.objects_len);
+		for (size_t i = 0; i < metadata_any_boards.objects_len; ++i) {
+			LOG_DBG("obj[%d].elements: %d",
+				i, metadata_any_boards.objects[i].objects_len);
+			for (size_t j = 0; j < metadata_any_boards.objects[i].objects_len; ++j) {
+				struct resp_probe_objects *obj =
+					&metadata_any_boards.objects[i].objects[j].objects;
+				LOG_DBG("\tMode: %s\n\tSHA: %s\n\tSize: %d",
+					obj->mode, obj->sha256sum, obj->size);
+			}
+		}
+
 		if (metadata_any_boards.objects_len != 2) {
-			LOG_ERR("Could not parse json");
+			LOG_ERR("Object length of type 'any metadata' is incorrect");
 			ctx.code_status = UPDATEHUB_METADATA_ERROR;
 			goto cleanup;
 		}
 
 		sha256size = strlen(
-			metadata_any_boards.objects[1].objects.sha256sum) + 1;
+			metadata_any_boards.objects[1].objects[0].objects.sha256sum) + 1;
 
 		if (sha256size != SHA256_HEX_DIGEST_SIZE) {
 			LOG_ERR("SHA256 size is invalid");
@@ -855,13 +880,26 @@ enum updatehub_response updatehub_probe(void)
 		}
 
 		memcpy(update_info.sha256sum_image,
-		       metadata_any_boards.objects[1].objects.sha256sum,
+		       metadata_any_boards.objects[1].objects[0].objects.sha256sum,
 		       SHA256_HEX_DIGEST_SIZE);
-		update_info.image_size = metadata_any_boards.objects[1].objects.size;
-		LOG_DBG("metadata_any: %s", update_info.sha256sum_image);
+		update_info.image_size = metadata_any_boards.objects[1].objects[0].objects.size;
+		LOG_DBG("metadata_any: %s",
+			update_info.sha256sum_image);
 	} else {
+		LOG_DBG("elements: %d\n", metadata_some_boards.objects_len);
+		for (size_t i = 0; i < metadata_some_boards.objects_len; ++i) {
+			LOG_DBG("obj[%d].elements: %d\n",
+				i, metadata_some_boards.objects[i].objects_len);
+			for (size_t j = 0; j < metadata_some_boards.objects[i].objects_len; ++j) {
+				struct resp_probe_objects *obj =
+					&metadata_some_boards.objects[i].objects[j].objects;
+				LOG_DBG("\tMode: %s\n\tSHA: %s\n\tSize: %d\n",
+					obj->mode, obj->sha256sum, obj->size);
+			}
+		}
+
 		if (metadata_some_boards.objects_len != 2) {
-			LOG_ERR("Could not parse json");
+			LOG_ERR("Object length of type 'some metadata' is incorrect");
 			ctx.code_status = UPDATEHUB_METADATA_ERROR;
 			goto cleanup;
 		}
@@ -874,7 +912,7 @@ enum updatehub_response updatehub_probe(void)
 		}
 
 		sha256size = strlen(
-			metadata_some_boards.objects[1].objects.sha256sum) + 1;
+			metadata_some_boards.objects[1].objects[0].objects.sha256sum) + 1;
 
 		if (sha256size != SHA256_HEX_DIGEST_SIZE) {
 			LOG_ERR("SHA256 size is invalid");
@@ -883,11 +921,12 @@ enum updatehub_response updatehub_probe(void)
 		}
 
 		memcpy(update_info.sha256sum_image,
-		       metadata_some_boards.objects[1].objects.sha256sum,
+		       metadata_some_boards.objects[1].objects[0].objects.sha256sum,
 		       SHA256_HEX_DIGEST_SIZE);
 		update_info.image_size =
-			metadata_some_boards.objects[1].objects.size;
-		LOG_DBG("metadata_some: %s", update_info.sha256sum_image);
+			metadata_some_boards.objects[1].objects[0].objects.size;
+		LOG_DBG("metadata_some: %s",
+			update_info.sha256sum_image);
 	}
 
 	ctx.code_status = UPDATEHUB_HAS_UPDATE;
@@ -904,7 +943,7 @@ error:
 	return ctx.code_status;
 }
 
-enum updatehub_response updatehub_update(void)
+enum updatehub_response z_impl_updatehub_update(void)
 {
 	if (report(UPDATEHUB_STATE_DOWNLOADING) < 0) {
 		LOG_ERR("Could not reporting downloading state");
@@ -925,8 +964,9 @@ enum updatehub_response updatehub_update(void)
 		goto error;
 	}
 
-	if (boot_request_upgrade(BOOT_UPGRADE_TEST)) {
-		LOG_ERR("Could not reporting downloaded state");
+	if (updatehub_storage_mark_partition_to_upgrade(&ctx.storage_ctx,
+							UPDATEHUB_SLOT_PARTITION_1)) {
+		LOG_ERR("Could not mark partition to upgrade");
 		ctx.code_status = UPDATEHUB_INSTALL_ERROR;
 		goto error;
 	}
@@ -962,13 +1002,15 @@ static void autohandler(struct k_work *work)
 		LOG_ERR("Image is unconfirmed. Rebooting to revert back to previous"
 			"confirmed image.");
 
-		sys_reboot(SYS_REBOOT_WARM);
+		LOG_PANIC();
+		updatehub_reboot();
 		break;
 
 	case UPDATEHUB_HAS_UPDATE:
 		switch (updatehub_update()) {
 		case UPDATEHUB_OK:
-			sys_reboot(SYS_REBOOT_WARM);
+			LOG_PANIC();
+			updatehub_reboot();
 			break;
 
 		default:
@@ -984,10 +1026,10 @@ static void autohandler(struct k_work *work)
 		break;
 	}
 
-	k_delayed_work_submit(&updatehub_work_handle, UPDATEHUB_POLL_INTERVAL);
+	k_work_reschedule(&updatehub_work_handle, UPDATEHUB_POLL_INTERVAL);
 }
 
-void updatehub_autohandler(void)
+void z_impl_updatehub_autohandler(void)
 {
 #if defined(CONFIG_UPDATEHUB_DOWNLOAD_SHA256_VERIFICATION)
 	LOG_INF("SHA-256 verification on download only");
@@ -999,6 +1041,6 @@ void updatehub_autohandler(void)
 	LOG_INF("SHA-256 verification on download and from flash");
 #endif
 
-	k_delayed_work_init(&updatehub_work_handle, autohandler);
-	k_delayed_work_submit(&updatehub_work_handle, K_NO_WAIT);
+	k_work_init_delayable(&updatehub_work_handle, autohandler);
+	k_work_reschedule(&updatehub_work_handle, K_NO_WAIT);
 }

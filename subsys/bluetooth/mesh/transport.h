@@ -1,5 +1,3 @@
-/*  Bluetooth Mesh */
-
 /*
  * Copyright (c) 2017 Intel Corporation
  *
@@ -9,11 +7,11 @@
 #define TRANS_SEQ_AUTH_NVAL            0xffffffffffffffff
 
 #define BT_MESH_SDU_UNSEG_MAX          11
-#define BT_MESH_CTL_SEG_SDU_MAX        8
-#define BT_MESH_APP_SEG_SDU_MAX        12
-#define BT_MESH_TX_SDU_MAX (CONFIG_BT_MESH_TX_SEG_MAX * BT_MESH_APP_SEG_SDU_MAX)
-#define BT_MESH_RX_SDU_MAX (CONFIG_BT_MESH_RX_SEG_MAX * BT_MESH_APP_SEG_SDU_MAX)
-#define BT_MESH_RX_CTL_MAX (CONFIG_BT_MESH_RX_SEG_MAX * BT_MESH_CTL_SEG_SDU_MAX)
+#define BT_MESH_CTL_SEG_SDU_MAX	       8
+
+#define BT_MESH_RX_CTL_MAX	       MAX((BT_MESH_RX_SEG_MAX *	\
+					    BT_MESH_CTL_SEG_SDU_MAX),	\
+					     BT_MESH_SDU_UNSEG_MAX)
 
 #define TRANS_SEQ_ZERO_MASK            ((uint16_t)BIT_MASK(13))
 #define TRANS_CTL_OP_MASK              ((uint8_t)BIT_MASK(7))
@@ -79,13 +77,6 @@ struct bt_mesh_ctl_friend_sub_confirm {
 	uint8_t xact;
 } __packed;
 
-struct bt_mesh_va {
-	uint16_t ref:15,
-		 changed:1;
-	uint16_t addr;
-	uint8_t  uuid[16];
-};
-
 bool bt_mesh_tx_in_progress(void);
 
 void bt_mesh_rx_reset(void);
@@ -110,15 +101,4 @@ int bt_mesh_trans_send(struct bt_mesh_net_tx *tx, struct net_buf_simple *msg,
 int bt_mesh_trans_recv(struct net_buf_simple *buf, struct bt_mesh_net_rx *rx);
 
 void bt_mesh_trans_init(void);
-
 void bt_mesh_trans_reset(void);
-
-struct bt_mesh_va *bt_mesh_va_get(uint16_t index);
-
-struct bt_mesh_va *bt_mesh_va_find(uint8_t uuid[16]);
-
-uint8_t bt_mesh_va_add(uint8_t uuid[16], uint16_t *addr);
-
-uint8_t bt_mesh_va_del(uint8_t uuid[16], uint16_t *addr);
-
-uint8_t *bt_mesh_va_label_get(uint16_t addr);

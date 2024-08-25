@@ -11,11 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <init.h>
-#include <drivers/uart.h>
+#include <zephyr/kernel.h>
+#include <zephyr/init.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/pm/device.h>
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(mdm_receiver, CONFIG_MODEM_LOG_LEVEL);
 
@@ -29,7 +30,7 @@ static struct mdm_receiver_context *contexts[MAX_MDM_CTX];
 /**
  * @brief  Finds receiver context which manages provided device.
  *
- * @param  *dev: device used by the receiver context.
+ * @param  dev: device used by the receiver context.
  *
  * @retval Receiver context or NULL.
  */
@@ -52,7 +53,7 @@ static struct mdm_receiver_context *context_from_dev(const struct device *dev)
  * @note   Amount of stored receiver contexts is determined by
  *         MAX_MDM_CTX.
  *
- * @param  *ctx: receiver context to persist.
+ * @param  ctx: receiver context to persist.
  *
  * @retval 0 if ok, < 0 if error.
  */
@@ -75,7 +76,7 @@ static int mdm_receiver_get(struct mdm_receiver_context *ctx)
  *
  * @note   Discards remaining data.
  *
- * @param  *ctx: receiver context.
+ * @param  ctx: receiver context.
  *
  * @retval None.
  */
@@ -97,7 +98,7 @@ static void mdm_receiver_flush(struct mdm_receiver_context *ctx)
  * @note   Fills contexts ring buffer with received data.
  *         When ring buffer is full the data is discarded.
  *
- * @param  *uart_dev: uart device.
+ * @param  uart_dev: uart device.
  *
  * @retval None.
  */
@@ -137,7 +138,7 @@ static void mdm_receiver_isr(const struct device *uart_dev, void *user_data)
 /**
  * @brief  Configures receiver context and assigned device.
  *
- * @param  *ctx: receiver context.
+ * @param  ctx: receiver context.
  *
  * @retval None.
  */
@@ -198,16 +199,16 @@ int mdm_receiver_send(struct mdm_receiver_context *ctx,
 int mdm_receiver_sleep(struct mdm_receiver_context *ctx)
 {
 	uart_irq_rx_disable(ctx->uart_dev);
-#ifdef DEVICE_PM_LOW_POWER_STATE
-	device_set_power_state(ctx->uart_dev, DEVICE_PM_LOW_POWER_STATE, NULL, NULL);
+#ifdef CONFIG_PM_DEVICE
+	pm_device_action_run(ctx->uart_dev, PM_DEVICE_ACTION_SUSPEND);
 #endif
 	return 0;
 }
 
 int mdm_receiver_wake(struct mdm_receiver_context *ctx)
 {
-#ifdef DEVICE_PM_LOW_POWER_STATE
-	device_set_power_state(ctx->uart_dev, DEVICE_PM_ACTIVE_STATE, NULL, NULL);
+#ifdef CONFIG_PM_DEVICE
+	pm_device_action_run(ctx->uart_dev, PM_DEVICE_ACTION_RESUME);
 #endif
 	uart_irq_rx_enable(ctx->uart_dev);
 
@@ -215,7 +216,7 @@ int mdm_receiver_wake(struct mdm_receiver_context *ctx)
 }
 
 int mdm_receiver_register(struct mdm_receiver_context *ctx,
-			  const char *uart_dev_name,
+			  const struct device *uart_dev,
 			  uint8_t *buf, size_t size)
 {
 	int ret;
@@ -224,12 +225,13 @@ int mdm_receiver_register(struct mdm_receiver_context *ctx,
 		return -EINVAL;
 	}
 
-	ctx->uart_dev = device_get_binding(uart_dev_name);
-	if (!ctx->uart_dev) {
-		LOG_ERR("Binding failure for uart: %s", uart_dev_name);
+	if (!device_is_ready(uart_dev)) {
+		LOG_ERR("Device is not ready: %s",
+			uart_dev ? uart_dev->name : "<null>");
 		return -ENODEV;
 	}
 
+	ctx->uart_dev = uart_dev;
 	ring_buf_init(&ctx->rx_rb, size, buf);
 	k_sem_init(&ctx->rx_sem, 0, 1);
 

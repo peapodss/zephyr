@@ -6,24 +6,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(net_test, CONFIG_NET_IPV6_LOG_LEVEL);
 
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <string.h>
 #include <errno.h>
-#include <device.h>
-#include <init.h>
-#include <linker/sections.h>
-#include <random/rand32.h>
+#include <zephyr/device.h>
+#include <zephyr/init.h>
+#include <zephyr/linker/sections.h>
+#include <zephyr/random/random.h>
 
-#include <ztest.h>
+#include <zephyr/ztest.h>
 
-#include <net/net_core.h>
-#include <net/net_pkt.h>
-#include <net/net_ip.h>
-#include <net/dummy.h>
+#include <zephyr/net/net_core.h>
+#include <zephyr/net/net_pkt.h>
+#include <zephyr/net/net_ip.h>
+#include <zephyr/net/dummy.h>
 
 #define NET_LOG_ENABLED 1
 #include "net_private.h"
@@ -33,6 +33,8 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_IPV6_LOG_LEVEL);
 #else
 #define DBG(fmt, ...)
 #endif
+
+static struct net_if *default_iface;
 
 #define TEST_BYTE_1(value, expected)				 \
 	do {							 \
@@ -66,15 +68,17 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_IPV6_LOG_LEVEL);
 			      "Test %s failed.\n", expected);		\
 	} while (0)
 
+#define LL_ADDR_STR_SIZE sizeof("xx:xx:xx:xx:xx:xx")
+
 #define TEST_LL_6_TWO(a, b, c, d, e, f, expected)			\
 	do {								\
 		uint8_t ll1[] = { a, b, c, d, e, f };			\
 		uint8_t ll2[] = { f, e, d, c, b, a };			\
-		char out[2 * sizeof("xx:xx:xx:xx:xx:xx") + 1 + 1];	\
+		char out[2 * LL_ADDR_STR_SIZE + 1 + 1];	\
 		snprintk(out, sizeof(out), "%s ",			\
 			 net_sprint_ll_addr(ll1, sizeof(ll1)));		\
-		snprintk(out + sizeof("xx:xx:xx:xx:xx:xx"),		\
-			 sizeof(out), "%s",				\
+		snprintk(out + LL_ADDR_STR_SIZE,			\
+			 sizeof(out) - LL_ADDR_STR_SIZE, "%s",		\
 			 net_sprint_ll_addr(ll2, sizeof(ll2)));		\
 		zassert_false(strcmp(out, expected),			\
 			      "Test %s failed, got %s\n", expected,	\
@@ -125,7 +129,7 @@ static uint8_t *net_test_get_mac(const struct device *dev)
 		context->mac_addr[2] = 0x5E;
 		context->mac_addr[3] = 0x00;
 		context->mac_addr[4] = 0x53;
-		context->mac_addr[5] = sys_rand32_get();
+		context->mac_addr[5] = sys_rand8_get();
 	}
 
 	return context->mac_addr;
@@ -154,20 +158,20 @@ static struct dummy_api net_test_if_api = {
 #define _ETH_L2_CTX_TYPE NET_L2_GET_CTX_TYPE(DUMMY_L2)
 
 NET_DEVICE_INIT_INSTANCE(net_addr_test1, "net_addr_test1", iface1,
-			 net_test_init, device_pm_control_nop,
+			 net_test_init, NULL,
 			 &net_test_context_data, NULL,
 			 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
 			 &net_test_if_api, _ETH_L2_LAYER, _ETH_L2_CTX_TYPE,
 			 127);
 
 NET_DEVICE_INIT_INSTANCE(net_addr_test2, "net_addr_test2", iface2,
-			 net_test_init, device_pm_control_nop,
+			 net_test_init, NULL,
 			 &net_test_context_data, NULL,
 			 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
 			 &net_test_if_api, _ETH_L2_LAYER, _ETH_L2_CTX_TYPE,
 			 127);
 
-static void test_ip_addresses(void)
+ZTEST(ip_addr_fn, test_ip_addresses)
 {
 	TEST_BYTE_1(0xde, "DE");
 	TEST_BYTE_1(0x09, "09");
@@ -205,7 +209,7 @@ static void test_ip_addresses(void)
 	TEST_IPV4(127, 0, 0, 1, "127.0.0.1");
 }
 
-static void test_ipv6_addresses(void)
+ZTEST(ip_addr_fn, test_ipv6_addresses)
 {
 	struct in6_addr loopback = IN6ADDR_LOOPBACK_INIT;
 	struct in6_addr any = IN6ADDR_ANY_INIT;
@@ -234,7 +238,7 @@ static void test_ipv6_addresses(void)
 	zassert_true(net_ipv6_is_addr_mcast(&mcast),
 		     "IPv6 multicast address check failed.");
 
-	ifaddr1 = net_if_ipv6_addr_add(net_if_get_default(),
+	ifaddr1 = net_if_ipv6_addr_add(default_iface,
 				      &addr6,
 				      NET_ADDR_MANUAL,
 				      0);
@@ -272,12 +276,12 @@ static void test_ipv6_addresses(void)
 					 (uint8_t *)&addr6_pref3, 255),
 		      "Too long prefix test failed");
 
-	ifmaddr1 = net_if_ipv6_maddr_add(net_if_get_default(), &mcast);
+	ifmaddr1 = net_if_ipv6_maddr_add(default_iface, &mcast);
 
 	/**TESTPOINTS: Check IPv6 addresses*/
 	zassert_not_null(ifmaddr1, "IPv6 multicast address add failed");
 
-	ifmaddr1 = net_if_ipv6_maddr_add(net_if_get_default(), &addr6);
+	ifmaddr1 = net_if_ipv6_maddr_add(default_iface, &addr6);
 
 	zassert_is_null(ifmaddr1,
 			"IPv6 multicast address could be added failed");
@@ -285,7 +289,7 @@ static void test_ipv6_addresses(void)
 	zassert_false(memcmp(net_ipv6_unspecified_address(), &any, sizeof(any)),
 		      "My IPv6 unspecified address check failed");
 
-	ifaddr2 = net_if_ipv6_addr_add(net_if_get_default(),
+	ifaddr2 = net_if_ipv6_addr_add(default_iface,
 				       &addr6,
 				       NET_ADDR_AUTOCONF,
 				       0);
@@ -293,18 +297,18 @@ static void test_ipv6_addresses(void)
 
 	ifaddr2->addr_state = NET_ADDR_PREFERRED;
 
-	tmp = net_if_ipv6_get_ll(net_if_get_default(), NET_ADDR_PREFERRED);
+	tmp = net_if_ipv6_get_ll(default_iface, NET_ADDR_PREFERRED);
 	zassert_false(tmp && memcmp(tmp, &addr6.s6_addr,
 				    sizeof(struct in6_addr)),
 		      "IPv6 ll address fetch failed");
 
 	ifaddr2->addr_state = NET_ADDR_DEPRECATED;
 
-	tmp = net_if_ipv6_get_ll(net_if_get_default(), NET_ADDR_PREFERRED);
+	tmp = net_if_ipv6_get_ll(default_iface, NET_ADDR_PREFERRED);
 	zassert_false(tmp && !memcmp(tmp, &any, sizeof(struct in6_addr)),
 		      "IPv6 preferred ll address fetch failed");
 
-	ifaddr1 = net_if_ipv6_addr_add(net_if_get_default(),
+	ifaddr1 = net_if_ipv6_addr_add(default_iface,
 				       &addr6_pref2,
 				       NET_ADDR_AUTOCONF,
 				       0);
@@ -315,7 +319,7 @@ static void test_ipv6_addresses(void)
 	/* Two tests for IPv6, first with interface given, then when
 	 * iface is NULL
 	 */
-	for (i = 0, iface = net_if_get_default(); i < 2; i++, iface = NULL) {
+	for (i = 0, iface = default_iface; i < 2; i++, iface = NULL) {
 		ifaddr2->addr_state = NET_ADDR_DEPRECATED;
 
 		out = net_if_ipv6_select_src_addr(iface, &addr6_pref1);
@@ -360,13 +364,13 @@ static void test_ipv6_addresses(void)
 			      iface);
 	}
 
-	zassert_true(net_if_ipv6_addr_rm(net_if_get_default(), &addr6),
+	zassert_true(net_if_ipv6_addr_rm(default_iface, &addr6),
 		     "IPv6 removing address failed\n");
-	zassert_true(net_if_ipv6_addr_rm(net_if_get_default(), &addr6_pref2),
+	zassert_true(net_if_ipv6_addr_rm(default_iface, &addr6_pref2),
 		     "IPv6 removing address failed\n");
 }
 
-static void test_ipv4_addresses(void)
+ZTEST(ip_addr_fn, test_ipv4_addresses)
 {
 	const struct in_addr *out;
 	struct net_if_addr *ifaddr1;
@@ -391,7 +395,7 @@ static void test_ipv4_addresses(void)
 	struct net_if *iface, *iface1, *iface2;
 	int i, ret;
 
-	ifaddr1 = net_if_ipv4_addr_add(net_if_get_default(),
+	ifaddr1 = net_if_ipv4_addr_add(default_iface,
 				       &addr4,
 				       NET_ADDR_MANUAL,
 				       0);
@@ -400,11 +404,15 @@ static void test_ipv4_addresses(void)
 	zassert_true(net_ipv4_is_my_addr(&addr4),
 		     "My IPv4 address check failed");
 
-	ifaddr1 = net_if_ipv4_addr_add(net_if_get_default(),
+	net_if_ipv4_set_netmask_by_addr(default_iface, &addr4, &netmask);
+
+	ifaddr1 = net_if_ipv4_addr_add(default_iface,
 				       &lladdr4,
 				       NET_ADDR_MANUAL,
 				       0);
 	zassert_not_null(ifaddr1, "IPv4 interface address add failed");
+
+	net_if_ipv4_set_netmask_by_addr(default_iface, &lladdr4, &netmask2);
 
 	zassert_true(net_ipv4_is_my_addr(&lladdr4),
 		     "My IPv4 address check failed");
@@ -415,7 +423,7 @@ static void test_ipv4_addresses(void)
 	/* Two tests for IPv4, first with interface given, then when
 	 * iface is NULL
 	 */
-	for (i = 0, iface = net_if_get_default(); i < 2; i++, iface = NULL) {
+	for (i = 0, iface = default_iface; i < 2; i++, iface = NULL) {
 		out = net_if_ipv4_select_src_addr(iface, &addr4);
 		zassert_not_null(out,  "IPv4 src addr selection failed, "
 				 "iface %p\n", iface);
@@ -464,13 +472,12 @@ static void test_ipv4_addresses(void)
 			      iface);
 	}
 
-	iface = net_if_get_default();
+	iface = default_iface;
 
 	net_if_ipv4_set_gw(iface, &gw);
-	net_if_ipv4_set_netmask(iface, &netmask);
 
 	zassert_false(net_ipv4_addr_mask_cmp(iface, &fail_addr),
-		"IPv4 wrong match failed");
+		      "IPv4 wrong match failed");
 
 	zassert_true(net_ipv4_addr_mask_cmp(iface, &match_addr),
 		     "IPv4 match failed");
@@ -485,10 +492,10 @@ static void test_ipv4_addresses(void)
 
 	zassert_false(net_ipv4_is_addr_mcast(&bcast_addr1), "IPv4 broadcast address");
 
-	ifmaddr1 = net_if_ipv4_maddr_add(net_if_get_default(), &maddr4a);
+	ifmaddr1 = net_if_ipv4_maddr_add(default_iface, &maddr4a);
 	zassert_not_null(ifmaddr1, "IPv4 multicast address add failed");
 
-	ifmaddr1 = net_if_ipv4_maddr_add(net_if_get_default(), &maddr4b);
+	ifmaddr1 = net_if_ipv4_maddr_add(default_iface, &maddr4b);
 	zassert_not_null(ifmaddr1, "IPv4 multicast address add failed");
 
 	iface = NULL;
@@ -537,16 +544,16 @@ static void test_ipv4_addresses(void)
 	ret = net_ipv4_is_addr_bcast(iface, &bcast_addr5);
 	zassert_true(ret, "IPv4 address 5 is not broadcast address");
 
-	net_if_ipv4_set_netmask(iface, &netmask2);
-
 	ret = net_ipv4_is_addr_bcast(iface, &bcast_addr2);
 	zassert_false(ret, "IPv4 address 2 is broadcast address");
+
+	net_if_ipv4_set_netmask_by_addr(iface, &addr4, &netmask2);
 
 	ret = net_ipv4_is_addr_bcast(iface, &bcast_addr3);
 	zassert_true(ret, "IPv4 address 3 is not broadcast address");
 }
 
-static void test_ipv6_mesh_addresses(void)
+ZTEST(ip_addr_fn, test_ipv6_mesh_addresses)
 {
 	struct net_if_addr *ifaddr;
 	const struct in6_addr *out;
@@ -559,7 +566,7 @@ static void test_ipv6_mesh_addresses(void)
 					 0, 0, 0, 0, 0x1 } } };
 	struct in6_addr ml_mcast = { { { 0xff, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 					 0, 0, 0, 0, 0x1 } } };
-	struct net_if *iface = net_if_get_default();
+	struct net_if *iface = default_iface;
 
 	ifaddr = net_if_ipv6_addr_add(iface, &lla, NET_ADDR_AUTOCONF, 0);
 	zassert_not_null(ifaddr, "IPv6 ll address autoconf add failed");
@@ -598,14 +605,109 @@ static void test_ipv6_mesh_addresses(void)
 		     "IPv6 removing address failed\n");
 }
 
-void test_main(void)
+ZTEST(ip_addr_fn, test_private_ipv6_addresses)
 {
-	ztest_test_suite(test_ip_addr_fn,
-			 ztest_unit_test(test_ip_addresses),
-			 ztest_unit_test(test_ipv6_addresses),
-			 ztest_unit_test(test_ipv4_addresses),
-			 ztest_unit_test(test_ipv6_mesh_addresses)
-		);
+	bool ret;
+	struct {
+		struct in6_addr addr;
+		bool is_private;
+	} addrs[] = {
+		{
+			.addr = { { { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+				      0, 0, 0, 0, 0, 0, 0x99, 0x1 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 0xfc, 0x01, 0, 0, 0, 0, 0, 0,
+				      0, 0, 0, 0, 0, 0, 0, 1 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 0xfc, 0, 0, 0, 0, 0, 0, 0,
+				      0, 0, 0, 0, 0, 0, 0, 2 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 0x20, 0x01, 0x1d, 0xb8, 0, 0, 0, 0,
+				      0, 0, 0, 0, 0, 0, 0x99, 0x1 } } },
+			.is_private = false,
+		},
+	};
 
-	ztest_run_test_suite(test_ip_addr_fn);
+	for (int i = 0; i < ARRAY_SIZE(addrs); i++) {
+		ret = net_ipv6_is_private_addr(&addrs[i].addr);
+		zassert_equal(ret, addrs[i].is_private, "Address %s check failed",
+			      net_sprint_ipv6_addr(&addrs[i].addr));
+	}
+
 }
+
+ZTEST(ip_addr_fn, test_private_ipv4_addresses)
+{
+	bool ret;
+	struct {
+		struct in_addr addr;
+		bool is_private;
+	} addrs[] = {
+		{
+			.addr = { { { 192, 0, 2, 1 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 10, 1, 2, 1 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 100, 124, 2, 1 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 172, 24, 100, 12 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 172, 15, 254, 255 } } },
+			.is_private = false,
+		},
+		{
+			.addr = { { { 172, 16, 0, 0 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 192, 168, 10, 122 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 192, 51, 100, 255 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 203, 0, 113, 122 } } },
+			.is_private = true,
+		},
+		{
+			.addr = { { { 1, 2, 3, 4 } } },
+			.is_private = false,
+		},
+		{
+			.addr = { { { 192, 1, 32, 4 } } },
+			.is_private = false,
+		},
+	};
+
+	for (int i = 0; i < ARRAY_SIZE(addrs); i++) {
+		ret = net_ipv4_is_private_addr(&addrs[i].addr);
+		zassert_equal(ret, addrs[i].is_private, "Address %s check failed",
+			      net_sprint_ipv4_addr(&addrs[i].addr));
+	}
+
+}
+
+void *test_setup(void)
+{
+	default_iface = net_if_get_first_by_type(&NET_L2_GET_NAME(DUMMY));
+
+	return NULL;
+}
+
+ZTEST_SUITE(ip_addr_fn, NULL, test_setup, NULL, NULL, NULL);

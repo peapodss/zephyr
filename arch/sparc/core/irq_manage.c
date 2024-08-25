@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 #include <kernel_internal.h>
 #include <kswap.h>
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
 
 FUNC_NORETURN void z_irq_spurious(const void *unused)
@@ -31,7 +31,7 @@ void z_sparc_enter_irq(uint32_t irl)
 	_current_cpu->nested++;
 
 #ifdef CONFIG_IRQ_OFFLOAD
-	if (irl != 141) {
+	if (irl != 141U) {
 		irl = z_sparc_int_get_source(irl);
 		ite = &_sw_isr_table[irl];
 		ite->isr(ite->arg);

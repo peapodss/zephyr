@@ -14,7 +14,7 @@ variable (e.g. NODE_ADDR=0x0001 for unicast address 0x0001), or by
 manually editing the value in the ``board.h`` file.
 
 Because of the hard-coded values, the application is not suitable for
-production use, but is quite convenient for quick demonstrations of Mesh
+production use, but is quite convenient for quick demonstrations of mesh
 functionality.
 
 The application has some features especially designed for the BBC
@@ -54,3 +54,9 @@ For other boards, build and flash the application as follows:
 
 Refer to your :ref:`board's documentation <boards>` for alternative
 flash instructions if your board doesn't support the ``flash`` target.
+
+To run the application on an :ref:`nrf5340dk_nrf5340`, a Bluetooth controller application
+must also run on the network core. The :ref:`bluetooth-hci-ipc-sample` sample
+application may be used. Build this sample with configuration
+:zephyr_file:`samples/bluetooth/hci_ipc/nrf5340_cpunet_bt_mesh-bt_ll_sw_split.conf`
+to enable mesh support.

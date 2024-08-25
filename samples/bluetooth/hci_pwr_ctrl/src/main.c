@@ -8,18 +8,18 @@
 
 #include <zephyr/types.h>
 #include <stddef.h>
-#include <sys/printk.h>
-#include <sys/util.h>
-#include <sys/byteorder.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/sys/byteorder.h>
 
-#include <bluetooth/bluetooth.h>
-#include <bluetooth/hci.h>
-#include <bluetooth/hci_vs.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/hci_vs.h>
 
-#include <bluetooth/conn.h>
-#include <bluetooth/uuid.h>
-#include <bluetooth/gatt.h>
-#include <bluetooth/services/hrs.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/services/hrs.h>
 
 static struct bt_conn *default_conn;
 static uint16_t default_conn_handle;
@@ -29,18 +29,21 @@ static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HRS_VAL)),
 };
 
+static const struct bt_data sd[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+};
+
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 #define DEVICE_BEACON_TXPOWER_NUM  8
 
 static struct k_thread pwr_thread_data;
-static K_THREAD_STACK_DEFINE(pwr_thread_stack, 320);
+static K_THREAD_STACK_DEFINE(pwr_thread_stack, 512);
 
-static const int8_t txp[DEVICE_BEACON_TXPOWER_NUM] = {4, 0, -3, -8,
-						    -15, -18, -23, -30};
+static const int8_t txpower[DEVICE_BEACON_TXPOWER_NUM] = {4, 0, -3, -8,
+							  -15, -18, -23, -30};
 static const struct bt_le_adv_param *param =
-	BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_USE_NAME,
-			0x0020, 0x0020, NULL);
+	BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_ONE_TIME, 0x0020, 0x0020, NULL);
 
 static void read_conn_rssi(uint16_t handle, int8_t *rssi)
 {
@@ -61,9 +64,7 @@ static void read_conn_rssi(uint16_t handle, int8_t *rssi)
 
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_READ_RSSI, buf, &rsp);
 	if (err) {
-		uint8_t reason = rsp ?
-			((struct bt_hci_rp_read_rssi *)rsp->data)->status : 0;
-		printk("Read RSSI err: %d reason 0x%02x\n", err, reason);
+		printk("Read RSSI err: %d\n", err);
 		return;
 	}
 
@@ -96,10 +97,7 @@ static void set_tx_power(uint8_t handle_type, uint16_t handle, int8_t tx_pwr_lvl
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL,
 				   buf, &rsp);
 	if (err) {
-		uint8_t reason = rsp ?
-			((struct bt_hci_rp_vs_write_tx_power_level *)
-			  rsp->data)->status : 0;
-		printk("Set Tx power err: %d reason 0x%02x\n", err, reason);
+		printk("Set Tx power err: %d\n", err);
 		return;
 	}
 
@@ -131,10 +129,7 @@ static void get_tx_power(uint8_t handle_type, uint16_t handle, int8_t *tx_pwr_lv
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_VS_READ_TX_POWER_LEVEL,
 				   buf, &rsp);
 	if (err) {
-		uint8_t reason = rsp ?
-			((struct bt_hci_rp_vs_read_tx_power_level *)
-			  rsp->data)->status : 0;
-		printk("Read Tx power err: %d reason 0x%02x\n", err, reason);
+		printk("Read Tx power err: %d\n", err);
 		return;
 	}
 
@@ -151,7 +146,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	int ret;
 
 	if (err) {
-		printk("Connection failed (err 0x%02x)\n", err);
+		printk("Connection failed, err 0x%02x %s\n", err, bt_hci_err_to_str(err));
 	} else {
 		default_conn = bt_conn_ref(conn);
 		ret = bt_hci_get_conn_handle(default_conn,
@@ -182,7 +177,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	printk("Disconnected (reason 0x%02x)\n", reason);
+	printk("Disconnected, reason 0x%02x %s\n", reason, bt_hci_err_to_str(reason));
 
 	if (default_conn) {
 		bt_conn_unref(default_conn);
@@ -190,7 +185,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	}
 }
 
-static struct bt_conn_cb conn_callbacks = {
+BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
 };
@@ -206,7 +201,7 @@ static void bt_ready(int err)
 
 	/* Start advertising */
 	err = bt_le_adv_start(param, ad, ARRAY_SIZE(ad),
-			      NULL, 0);
+			      sd, ARRAY_SIZE(sd));
 	if (err) {
 		printk("Advertising failed to start (err %d)\n", err);
 		return;
@@ -235,9 +230,9 @@ void modulate_tx_power(void *p1, void *p2, void *p3)
 
 	while (1) {
 		if (!default_conn) {
-			printk("Set Tx power level to %d\n", txp[idx]);
+			printk("Set Tx power level to %d\n", txpower[idx]);
 			set_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV,
-				     0, txp[idx]);
+				     0, txpower[idx]);
 
 			k_sleep(K_SECONDS(5));
 
@@ -277,7 +272,7 @@ void modulate_tx_power(void *p1, void *p2, void *p3)
 	}
 }
 
-void main(void)
+int main(void)
 {
 	int8_t txp_get = 0xFF;
 	int err;
@@ -294,8 +289,6 @@ void main(void)
 	printk("Get Tx power level ->");
 	get_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0, &txp_get);
 	printk("-> default TXP = %d\n", txp_get);
-
-	bt_conn_cb_register(&conn_callbacks);
 
 	/* Wait for 5 seconds to give a chance users/testers
 	 * to check that default Tx power is indeed the one
@@ -314,4 +307,5 @@ void main(void)
 		hrs_notify();
 		k_sleep(K_SECONDS(2));
 	}
+	return 0;
 }

@@ -5,14 +5,15 @@
  */
 
 #include <stdio.h>
-#include <zephyr.h>
-#include <device.h>
-#include <drivers/sensor.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
 
 static void fetch_and_display(const struct device *sensor)
 {
 	static unsigned int count;
 	struct sensor_value accel[3];
+	struct sensor_value temperature;
 	const char *overrun = "";
 	int rc = sensor_sample_fetch(sensor);
 
@@ -32,30 +33,47 @@ static void fetch_and_display(const struct device *sensor)
 	if (rc < 0) {
 		printf("ERROR: Update failed: %d\n", rc);
 	} else {
-		printf("#%u @ %u ms: %sx %f , y %f , z %f\n",
+		printf("#%u @ %u ms: %sx %f , y %f , z %f",
 		       count, k_uptime_get_32(), overrun,
 		       sensor_value_to_double(&accel[0]),
 		       sensor_value_to_double(&accel[1]),
 		       sensor_value_to_double(&accel[2]));
 	}
+
+	if (IS_ENABLED(CONFIG_LIS2DH_MEASURE_TEMPERATURE)) {
+		if (rc == 0) {
+			rc = sensor_channel_get(sensor, SENSOR_CHAN_DIE_TEMP, &temperature);
+			if (rc < 0) {
+				printf("\nERROR: Unable to read temperature:%d\n", rc);
+			} else {
+				printf(", t %f\n", sensor_value_to_double(&temperature));
+			}
+		}
+
+	} else {
+		printf("\n");
+	}
 }
 
 #ifdef CONFIG_LIS2DH_TRIGGER
 static void trigger_handler(const struct device *dev,
-			    struct sensor_trigger *trig)
+			    const struct sensor_trigger *trig)
 {
 	fetch_and_display(dev);
 }
 #endif
 
-void main(void)
+int main(void)
 {
-	const struct device *sensor = device_get_binding(DT_LABEL(DT_INST(0, st_lis2dh)));
+	const struct device *const sensor = DEVICE_DT_GET_ANY(st_lis2dh);
 
 	if (sensor == NULL) {
-		printf("Could not get %s device\n",
-		       DT_LABEL(DT_INST(0, st_lis2dh)));
-		return;
+		printf("No device found\n");
+		return 0;
+	}
+	if (!device_is_ready(sensor)) {
+		printf("Device %s is not ready\n", sensor->name);
+		return 0;
 	}
 
 #if CONFIG_LIS2DH_TRIGGER
@@ -76,7 +94,7 @@ void main(void)
 					     &odr);
 			if (rc != 0) {
 				printf("Failed to set odr: %d\n", rc);
-				return;
+				return 0;
 			}
 			printf("Sampling at %u Hz\n", odr.val1);
 		}
@@ -84,7 +102,7 @@ void main(void)
 		rc = sensor_trigger_set(sensor, &trig, trigger_handler);
 		if (rc != 0) {
 			printf("Failed to set trigger: %d\n", rc);
-			return;
+			return 0;
 		}
 
 		printf("Waiting for triggers\n");

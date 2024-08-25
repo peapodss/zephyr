@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <ztest.h>
-#include <arch/cpu.h>
-#include <arch/arm/aarch32/cortex_m/cmsis.h>
+#include <zephyr/ztest.h>
+#include <zephyr/arch/cpu.h>
+#include <cmsis_core.h>
+#include <zephyr/sys/barrier.h>
 
 static volatile int test_flag;
 static volatile int expected_reason = -1;
@@ -15,7 +16,7 @@ static volatile int expected_reason = -1;
 static volatile int run_esf_validation;
 static volatile int esf_validation_rv;
 static volatile uint32_t expected_msp;
-static K_THREAD_STACK_DEFINE(esf_collection_stack, 1024);
+static K_THREAD_STACK_DEFINE(esf_collection_stack, 2048);
 static struct k_thread esf_collection_thread;
 #define MAIN_PRIORITY 7
 #define PRIORITY 5
@@ -23,7 +24,7 @@ static struct k_thread esf_collection_thread;
 /**
  * Validates that pEsf matches state from set_regs_with_known_pattern()
  */
-static int check_esf_matches_expectations(const z_arch_esf_t *pEsf)
+static int check_esf_matches_expectations(const struct arch_esf *pEsf)
 {
 	const uint16_t expected_fault_instruction = 0xde5a; /* udf #90 */
 	const bool caller_regs_match_expected =
@@ -73,7 +74,7 @@ static int check_esf_matches_expectations(const z_arch_esf_t *pEsf)
 	 * is overwritten in fault.c)
 	 */
 	if (memcmp((void *)callee_regs->psp, pEsf,
-		offsetof(struct __esf, basic.xpsr)) != 0) {
+		offsetof(struct arch_esf, basic.xpsr)) != 0) {
 		printk("psp does not match __basic_sf provided\n");
 		return -1;
 	}
@@ -87,7 +88,7 @@ static int check_esf_matches_expectations(const z_arch_esf_t *pEsf)
 	return 0;
 }
 
-void k_sys_fatal_error_handler(unsigned int reason, const z_arch_esf_t *pEsf)
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *pEsf)
 {
 	TC_PRINT("Caught system error -- reason %d\n", reason);
 
@@ -124,8 +125,12 @@ void k_sys_fatal_error_handler(unsigned int reason, const z_arch_esf_t *pEsf)
  * In k_sys_fatal_error_handler above we will check that the ESF provided
  * as a parameter matches these expectations.
  */
-void set_regs_with_known_pattern(void)
+void set_regs_with_known_pattern(void *p1, void *p2, void *p3)
 {
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
 	__asm__ volatile(
 		"mov r1, #1\n"
 		"mov r2, #2\n"
@@ -151,7 +156,7 @@ void set_regs_with_known_pattern(void)
 	);
 }
 
-void test_arm_esf_collection(void)
+ZTEST(arm_interrupt, test_arm_esf_collection)
 {
 	int test_validation_rv;
 
@@ -177,7 +182,7 @@ void test_arm_esf_collection(void)
 	TC_PRINT("Testing ESF Reporting\n");
 	k_thread_create(&esf_collection_thread, esf_collection_stack,
 			K_THREAD_STACK_SIZEOF(esf_collection_stack),
-			(k_thread_entry_t)set_regs_with_known_pattern,
+			set_regs_with_known_pattern,
 			NULL, NULL, NULL, K_PRIO_COOP(PRIORITY), 0,
 			K_NO_WAIT);
 
@@ -190,6 +195,23 @@ void test_arm_esf_collection(void)
 void arm_isr_handler(const void *args)
 {
 	ARG_UNUSED(args);
+
+#if defined(CONFIG_CPU_CORTEX_M) && defined(CONFIG_FPU) && \
+	defined(CONFIG_FPU_SHARING)
+	/* Clear Floating Point Status and Control Register (FPSCR),
+	 * to prevent from having the interrupt line set to pending again,
+	 * in case FPU IRQ is selected by the test as "Available IRQ line"
+	 */
+#if defined(CONFIG_ARMV8_1_M_MAINLINE)
+	/*
+	 * For ARMv8.1-M with FPU, the FPSCR[18:16] LTPSIZE field must be set
+	 * to 0b100 for "Tail predication not applied" as it's reset value
+	 */
+	__set_FPSCR(4 << FPU_FPDSCR_LTPSIZE_Pos);
+#else
+	__set_FPSCR(0);
+#endif
+#endif
 
 	test_flag++;
 
@@ -206,15 +228,6 @@ void arm_isr_handler(const void *args)
 		expected_reason = K_ERR_KERNEL_PANIC;
 		__ASSERT(0, "Intentional assert\n");
 	} else if (test_flag == 4) {
-#if defined(CONFIG_CPU_CORTEX_M_HAS_SYSTICK)
-#if !defined(CONFIG_SYS_CLOCK_EXISTS) || !defined(CONFIG_CORTEX_M_SYSTICK)
-		expected_reason = K_ERR_CPU_EXCEPTION;
-		SCB->ICSR |= SCB_ICSR_PENDSTSET_Msk;
-		__DSB();
-		__ISB();
-#endif
-#endif
-	} else if (test_flag == 5) {
 #if defined(CONFIG_HW_STACK_PROTECTION)
 		/*
 		 * Verify that the Stack Overflow has been reported by the core
@@ -228,7 +241,7 @@ void arm_isr_handler(const void *args)
 	}
 }
 
-void test_arm_interrupt(void)
+ZTEST(arm_interrupt, test_arm_interrupt)
 {
 	/* Determine an NVIC IRQ line that is not currently in use. */
 	int i;
@@ -284,8 +297,8 @@ void test_arm_interrupt(void)
 	NVIC_ClearPendingIRQ(i);
 	NVIC_EnableIRQ(i);
 	NVIC_SetPendingIRQ(i);
-	__DSB();
-	__ISB();
+	barrier_dsync_fence_full();
+	barrier_isync_fence_full();
 
 	/* Verify that the spurious ISR has led to the fault and the
 	 * expected reason variable is reset.
@@ -312,8 +325,8 @@ void test_arm_interrupt(void)
 		 * Instruction barriers to make sure the NVIC IRQ is
 		 * set to pending state before 'test_flag' is checked.
 		 */
-		__DSB();
-		__ISB();
+		barrier_dsync_fence_full();
+		barrier_isync_fence_full();
 
 		/* Returning here implies the thread was not aborted. */
 
@@ -321,29 +334,6 @@ void test_arm_interrupt(void)
 		post_flag = test_flag;
 		zassert_true(post_flag == j, "Test flag not set by ISR\n");
 	}
-
-#if defined(CONFIG_CPU_CORTEX_M_HAS_SYSTICK)
-#if !defined(CONFIG_SYS_CLOCK_EXISTS) || !defined(CONFIG_CORTEX_M_SYSTICK)
-	/* Verify that triggering a Cortex-M exception (accidentally) that has
-	 * not been installed in the vector table, leads to the reserved
-	 * exception been called and a resulting CPU fault. We test this using
-	 * the SysTick exception in platforms that are not expecting to use the
-	 * SysTick timer for system timing.
-	 */
-
-	/* The ISR will manually set the SysTick exception to pending state. */
-	NVIC_SetPendingIRQ(i);
-	__DSB();
-	__ISB();
-
-	/* Verify that the spurious exception has led to the fault and the
-	 * expected reason variable is reset.
-	 */
-	reason = expected_reason;
-	zassert_equal(reason, -1,
-		"expected_reason has not been reset (%d)\n", reason);
-#endif
-#endif
 
 #if defined(CONFIG_HW_STACK_PROTECTION)
 	/*
@@ -361,18 +351,29 @@ void test_arm_interrupt(void)
 	NVIC_EnableIRQ(i);
 	NVIC_SetPendingIRQ(i);
 
-	/* Set test flag so the IRQ handler executes the appropriate case. */
-	test_flag = 4;
-
 	/* Manually set PSP almost at the bottom of the stack. An exception
 	 * entry will make PSP descend below the limit and into the MPU guard
 	 * section (or beyond the address pointed by PSPLIM in ARMv8-M MCUs).
 	 */
+#if defined(CONFIG_FPU) && defined(CONFIG_FPU_SHARING) && \
+	defined(CONFIG_MPU_STACK_GUARD)
+#define FPU_STACK_EXTRA_SIZE 0x48
+	/* If an FP context is present, we should not set the PSP
+	 * too close to the end of the stack, because stacking of
+	 * the ESF might corrupt kernel memory, making it not
+	 * possible to continue the test execution.
+	 */
+	uint32_t fp_extra_size =
+		(__get_CONTROL() & CONTROL_FPCA_Msk) ?
+			FPU_STACK_EXTRA_SIZE : 0;
+	__set_PSP(_current->stack_info.start + 0x10 + fp_extra_size);
+#else
 	__set_PSP(_current->stack_info.start + 0x10);
+#endif
 
 	__enable_irq();
-	__DSB();
-	__ISB();
+	barrier_dsync_fence_full();
+	barrier_isync_fence_full();
 
 	/* No stack variable access below this point.
 	 * The IRQ will handle the verification.
@@ -381,7 +382,7 @@ void test_arm_interrupt(void)
 }
 
 #if defined(CONFIG_USERSPACE)
-#include <syscall_handler.h>
+#include <zephyr/internal/syscall_handler.h>
 #include "test_syscalls.h"
 
 void z_impl_test_arm_user_interrupt_syscall(void)
@@ -399,7 +400,7 @@ void z_impl_test_arm_user_interrupt_syscall(void)
 		first_call = 0;
 
 		/* Lock IRQs in supervisor mode */
-		int key = irq_lock();
+		unsigned int key = irq_lock();
 
 		/* Verify that IRQs were not already locked */
 		zassert_false(key, "IRQs locked in system call\n");
@@ -414,9 +415,9 @@ static inline void z_vrfy_test_arm_user_interrupt_syscall(void)
 {
 	z_impl_test_arm_user_interrupt_syscall();
 }
-#include <syscalls/test_arm_user_interrupt_syscall_mrsh.c>
+#include <zephyr/syscalls/test_arm_user_interrupt_syscall_mrsh.c>
 
-void test_arm_user_interrupt(void)
+ZTEST_USER(arm_interrupt, test_arm_user_interrupt)
 {
 	/* Test thread executing in user mode */
 	zassert_true(arch_is_user_context(),
@@ -452,12 +453,43 @@ void test_arm_user_interrupt(void)
 #endif
 }
 #else
-void test_arm_user_interrupt(void)
+ZTEST_USER(arm_interrupt, test_arm_user_interrupt)
 {
 	TC_PRINT("Skipped\n");
 }
 #endif /* CONFIG_USERSPACE */
 
+#if defined(CONFIG_CORTEX_M_NULL_POINTER_EXCEPTION)
+#pragma GCC push_options
+#pragma GCC optimize("O0")
+/* Avoid compiler optimizing null pointer de-referencing. */
+ZTEST(arm_interrupt, test_arm_null_pointer_exception)
+{
+	int reason;
+
+	struct test_struct {
+		uint32_t val[2];
+	};
+
+	struct test_struct *test_struct_null_pointer = 0x0;
+
+	expected_reason = K_ERR_CPU_EXCEPTION;
+
+	printk("Reading a null pointer value: 0x%0x\n",
+		test_struct_null_pointer->val[1]);
+
+	reason = expected_reason;
+	zassert_equal(reason, -1,
+		"expected_reason has not been reset (%d)\n", reason);
+}
+#pragma GCC pop_options
+#else
+ZTEST(arm_interrupt, test_arm_null_pointer_exception)
+{
+	TC_PRINT("Skipped\n");
+}
+
+#endif /* CONFIG_CORTEX_M_NULL_POINTER_EXCEPTION */
 
 /**
  * @}

@@ -4,24 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr.h>
-#include <device.h>
-#include <drivers/gpio.h>
-#include <mgmt/osdp.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/mgmt/osdp.h>
 
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
 
-#if DT_NODE_HAS_STATUS(LED0_NODE, okay)
-#define LED0         DT_GPIO_LABEL(LED0_NODE, gpios)
-#define LED0_PIN     DT_GPIO_PIN(LED0_NODE, gpios)
-#define FLAGS        DT_GPIO_FLAGS(LED0_NODE, gpios)
-#else
+#if !DT_NODE_HAS_STATUS(LED0_NODE, okay)
 #error "BOARD does not define a debug LED"
-#define LED0         ""
-#define LED0_PIN     0
-#define FLAGS        0
 #endif
+
+static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios, {0});
 
 #define SLEEP_TIME_MS                  (20)
 #define CNT_PER_SEC                    (1000 / SLEEP_TIME_MS)
@@ -33,9 +28,9 @@ enum osdp_pd_e {
 	OSDP_PD_SENTINEL,
 };
 
-int key_press_callback(int pd, uint8_t key)
+int key_press_callback(int pd, uint8_t *data, int len)
 {
-	printk("CP PD[%d] key press - data: 0x%02x\n", pd, key);
+	printk("CP PD[%d] key press - data: 0x%02x\n", pd, data[0]);
 	return 0;
 }
 
@@ -54,11 +49,26 @@ int card_read_callback(int pd, int format, uint8_t *data, int len)
 	return 0;
 }
 
-void main(void)
+int event_handler(void *unused, int pd, struct osdp_event *e)
+{
+	switch (e->type) {
+	case OSDP_EVENT_CARDREAD:
+		card_read_callback(pd, e->cardread.format,
+				   e->cardread.data, e->cardread.length);
+		break;
+	case OSDP_EVENT_KEYPRESS:
+		key_press_callback(pd, e->keypress.data, e->keypress.length);
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+int main(void)
 {
 	int ret, led_state;
 	uint32_t cnt = 0;
-	const struct device *dev;
 	struct osdp_cmd pulse_output = {
 		.id = OSDP_CMD_OUTPUT,
 		.output.output_no = 0,     /* First output */
@@ -66,20 +76,18 @@ void main(void)
 		.output.timer_count = 10,  /* Timer: 10 * 100ms = 1 second */
 	};
 
-	dev = device_get_binding(LED0);
-	if (dev == NULL) {
-		printk("Failed to get LED0 binding\n");
-		return;
+	if (!gpio_is_ready_dt(&led0)) {
+		printk("Failed to get LED GPIO port %s\n", led0.port->name);
+		return 0;
 	}
 
-	ret = gpio_pin_configure(dev, LED0_PIN, GPIO_OUTPUT_ACTIVE | FLAGS);
+	ret = gpio_pin_configure_dt(&led0, GPIO_OUTPUT_ACTIVE);
 	if (ret < 0) {
 		printk("Failed to configure gpio pin\n");
-		return;
+		return 0;
 	}
 
-	osdp_cp_set_callback_key_press(key_press_callback);
-	osdp_cp_set_callback_card_read(card_read_callback);
+	osdp_cp_set_event_callback(event_handler, NULL);
 
 	led_state = 0;
 	while (1) {
@@ -90,8 +98,9 @@ void main(void)
 		if ((cnt % COMMAND_WAIT_COUNT) == 0) {
 			osdp_cp_send_command(OSDP_PD_0, &pulse_output);
 		}
-		gpio_pin_set(dev, LED0_PIN, led_state);
+		gpio_pin_set(led0.port, led0.pin, led_state);
 		k_msleep(SLEEP_TIME_MS);
 		cnt++;
 	}
+	return 0;
 }

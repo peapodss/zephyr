@@ -10,12 +10,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(modem_cmd_handler, CONFIG_MODEM_LOG_LEVEL);
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 #include <stddef.h>
-#include <net/buf.h>
+#include <zephyr/net/buf.h>
 
 #include "modem_context.h"
 #include "modem_cmd_handler.h"
@@ -110,8 +110,9 @@ static int parse_params(struct modem_cmd_handler_data *data,  size_t match_len,
 			const struct modem_cmd *cmd,
 			uint8_t **argv, size_t argv_len, uint16_t *argc)
 {
-	int i, count = 0;
-	size_t begin, end;
+	int count = 0;
+	size_t delim_len, begin, end, i;
+	bool quoted = false;
 
 	if (!data || !data->match_buf || !match_len || !cmd || !argv || !argc) {
 		return -EINVAL;
@@ -119,8 +120,18 @@ static int parse_params(struct modem_cmd_handler_data *data,  size_t match_len,
 
 	begin = cmd->cmd_len;
 	end = cmd->cmd_len;
+	delim_len = strlen(cmd->delim);
 	while (end < match_len) {
-		for (i = 0; i < strlen(cmd->delim); i++) {
+		/* Don't look for delimiters in the middle of a quoted parameter */
+		if (data->match_buf[end] == '"') {
+			quoted = !quoted;
+		}
+		if (quoted) {
+			end++;
+			continue;
+		}
+		/* Look for delimiter characters */
+		for (i = 0; i < delim_len; i++) {
 			if (data->match_buf[end] == cmd->delim[i]) {
 				/* mark a parameter beginning */
 				argv[*argc] = &data->match_buf[begin];
@@ -151,7 +162,7 @@ static int parse_params(struct modem_cmd_handler_data *data,  size_t match_len,
 		argv[*argc] = &data->match_buf[begin];
 		/* end parameter with NUL char
 		 * NOTE: if this is at the end of match_len will probably
-		 * be overwriting a NUL that's already ther
+		 * be overwriting a NUL that's already there
 		 */
 		data->match_buf[end] = '\0';
 		(*argc)++;
@@ -159,7 +170,16 @@ static int parse_params(struct modem_cmd_handler_data *data,  size_t match_len,
 
 	/* missing arguments */
 	if (*argc < cmd->arg_count_min) {
-		return -EAGAIN;
+		/* Do not return -EAGAIN here as there is no way new argument
+		 * can be parsed later because match_len is computed to be
+		 * the minimum of the distance to the first CRLF and the size
+		 * of the buffer.
+		 * Therefore, waiting more data on the interface won't change
+		 * match_len value, which mean there is no point in waiting
+		 * for more arguments, this will just end in a infinite loop
+		 * parsing data and finding that some arguments are missing.
+		 */
+		return -EINVAL;
 	}
 
 	/*
@@ -215,7 +235,8 @@ static int process_cmd(const struct modem_cmd *cmd, size_t match_len,
 static const struct modem_cmd *find_cmd_match(
 		struct modem_cmd_handler_data *data)
 {
-	int j, i;
+	int j;
+	size_t i;
 
 	for (j = 0; j < ARRAY_SIZE(data->cmds); j++) {
 		if (!data->cmds[j] || data->cmds_len[j] == 0U) {
@@ -238,7 +259,7 @@ static const struct modem_cmd *find_cmd_match(
 static const struct modem_cmd *find_cmd_direct_match(
 		struct modem_cmd_handler_data *data)
 {
-	int j, i;
+	size_t j, i;
 
 	for (j = 0; j < ARRAY_SIZE(data->cmds); j++) {
 		if (!data->cmds[j] || data->cmds_len[j] == 0U) {
@@ -329,7 +350,7 @@ static void cmd_handler_process_rx_buf(struct modem_cmd_handler_data *data)
 				break;
 			} else if (ret > 0) {
 				LOG_DBG("match direct cmd [%s] (ret:%d)",
-					log_strdup(cmd->cmd), ret);
+					cmd->cmd, ret);
 				data->rx_buf = net_buf_skip(data->rx_buf, ret);
 			}
 
@@ -354,7 +375,7 @@ static void cmd_handler_process_rx_buf(struct modem_cmd_handler_data *data)
 					      data->rx_buf, 0, len);
 		if ((data->match_buf_len - 1) < match_len) {
 			LOG_ERR("Match buffer size (%zu) is too small for "
-				"incoming command size: %u!  Truncating!",
+				"incoming command size: %zu!  Truncating!",
 				data->match_buf_len - 1, match_len);
 		}
 
@@ -366,12 +387,16 @@ static void cmd_handler_process_rx_buf(struct modem_cmd_handler_data *data)
 
 		cmd = find_cmd_match(data);
 		if (cmd) {
-			LOG_DBG("match cmd [%s] (len:%u)",
-				log_strdup(cmd->cmd), match_len);
+			LOG_DBG("match cmd [%s] (len:%zu)",
+				cmd->cmd, match_len);
 
-			if (process_cmd(cmd, match_len, data) == -EAGAIN) {
+			ret = process_cmd(cmd, match_len, data);
+			if (ret == -EAGAIN) {
 				k_sem_give(&data->sem_parse_lock);
 				break;
+			} else if (ret < 0) {
+				LOG_ERR("process cmd [%s] (len:%zu, ret:%d)",
+					cmd->cmd, match_len, ret);
 			}
 
 			/*
@@ -467,15 +492,14 @@ int modem_cmd_handler_update_cmds(struct modem_cmd_handler_data *data,
 	return 0;
 }
 
-static int _modem_cmd_send(struct modem_iface *iface,
-			   struct modem_cmd_handler *handler,
-			   const struct modem_cmd *handler_cmds,
-			   size_t handler_cmds_len,
-			   const uint8_t *buf, struct k_sem *sem,
-			   k_timeout_t timeout, bool no_tx_lock)
+int modem_cmd_send_ext(struct modem_iface *iface,
+		       struct modem_cmd_handler *handler,
+		       const struct modem_cmd *handler_cmds,
+		       size_t handler_cmds_len, const uint8_t *buf,
+		       struct k_sem *sem, k_timeout_t timeout, int flags)
 {
 	struct modem_cmd_handler_data *data;
-	int ret;
+	int ret = 0;
 
 	if (!iface || !handler || !handler->cmd_handler_data || !buf) {
 		return -EINVAL;
@@ -490,14 +514,16 @@ static int _modem_cmd_send(struct modem_iface *iface,
 	}
 
 	data = (struct modem_cmd_handler_data *)(handler->cmd_handler_data);
-	if (!no_tx_lock) {
+	if (!(flags & MODEM_NO_TX_LOCK)) {
 		k_sem_take(&data->sem_tx_lock, K_FOREVER);
 	}
 
-	ret = modem_cmd_handler_update_cmds(data, handler_cmds,
-					    handler_cmds_len, true);
-	if (ret < 0) {
-		goto unlock_tx_lock;
+	if (!(flags & MODEM_NO_SET_CMDS)) {
+		ret = modem_cmd_handler_update_cmds(data, handler_cmds,
+						    handler_cmds_len, true);
+		if (ret < 0) {
+			goto unlock_tx_lock;
+		}
 	}
 
 #if defined(CONFIG_MODEM_CONTEXT_VERBOSE_DEBUG)
@@ -531,36 +557,17 @@ static int _modem_cmd_send(struct modem_iface *iface,
 		}
 	}
 
-	/* unset handlers and ignore any errors */
-	(void)modem_cmd_handler_update_cmds(data, NULL, 0U, false);
+	if (!(flags & MODEM_NO_UNSET_CMDS)) {
+		/* unset handlers and ignore any errors */
+		(void)modem_cmd_handler_update_cmds(data, NULL, 0U, false);
+	}
 
 unlock_tx_lock:
-	if (!no_tx_lock) {
+	if (!(flags & MODEM_NO_TX_LOCK)) {
 		k_sem_give(&data->sem_tx_lock);
 	}
 
 	return ret;
-}
-
-int modem_cmd_send_nolock(struct modem_iface *iface,
-			  struct modem_cmd_handler *handler,
-			  const struct modem_cmd *handler_cmds,
-			  size_t handler_cmds_len,
-			  const uint8_t *buf, struct k_sem *sem,
-			  k_timeout_t timeout)
-{
-	return _modem_cmd_send(iface, handler, handler_cmds, handler_cmds_len,
-			       buf, sem, timeout, true);
-}
-
-int modem_cmd_send(struct modem_iface *iface,
-		   struct modem_cmd_handler *handler,
-		   const struct modem_cmd *handler_cmds,
-		   size_t handler_cmds_len, const uint8_t *buf,
-		   struct k_sem *sem, k_timeout_t timeout)
-{
-	return _modem_cmd_send(iface, handler, handler_cmds, handler_cmds_len,
-			       buf, sem, timeout, false);
 }
 
 /* run a set of AT commands */
@@ -569,12 +576,10 @@ int modem_cmd_handler_setup_cmds(struct modem_iface *iface,
 				 const struct setup_cmd *cmds, size_t cmds_len,
 				 struct k_sem *sem, k_timeout_t timeout)
 {
-	int ret = 0, i;
+	int ret = 0;
+	size_t i;
 
 	for (i = 0; i < cmds_len; i++) {
-		if (i) {
-			k_sleep(K_MSEC(50));
-		}
 
 		if (cmds[i].handle_cmd.cmd && cmds[i].handle_cmd.func) {
 			ret = modem_cmd_send(iface, handler,
@@ -587,9 +592,11 @@ int modem_cmd_handler_setup_cmds(struct modem_iface *iface,
 					     sem, timeout);
 		}
 
+		k_sleep(K_MSEC(50));
+
 		if (ret < 0) {
 			LOG_ERR("command %s ret:%d",
-				log_strdup(cmds[i].send_cmd), ret);
+				cmds[i].send_cmd, ret);
 			break;
 		}
 	}
@@ -604,12 +611,10 @@ int modem_cmd_handler_setup_cmds_nolock(struct modem_iface *iface,
 					size_t cmds_len, struct k_sem *sem,
 					k_timeout_t timeout)
 {
-	int ret = 0, i;
+	int ret = 0;
+	size_t i;
 
 	for (i = 0; i < cmds_len; i++) {
-		if (i) {
-			k_sleep(K_MSEC(50));
-		}
 
 		if (cmds[i].handle_cmd.cmd && cmds[i].handle_cmd.func) {
 			ret = modem_cmd_send_nolock(iface, handler,
@@ -622,9 +627,11 @@ int modem_cmd_handler_setup_cmds_nolock(struct modem_iface *iface,
 						    sem, timeout);
 		}
 
+		k_sleep(K_MSEC(50));
+
 		if (ret < 0) {
 			LOG_ERR("command %s ret:%d",
-				log_strdup(cmds[i].send_cmd), ret);
+				cmds[i].send_cmd, ret);
 			break;
 		}
 	}
@@ -650,25 +657,47 @@ void modem_cmd_handler_tx_unlock(struct modem_cmd_handler *handler)
 }
 
 int modem_cmd_handler_init(struct modem_cmd_handler *handler,
-			   struct modem_cmd_handler_data *data)
+			   struct modem_cmd_handler_data *data,
+			   const struct modem_cmd_handler_config *config)
 {
-	if (!handler || !data) {
+	/* Verify arguments */
+	if (handler == NULL || data == NULL || config == NULL) {
 		return -EINVAL;
 	}
 
-	if (!data->match_buf_len) {
+	/* Verify config */
+	if ((config->match_buf == NULL) ||
+	    (config->match_buf_len == 0) ||
+	    (config->buf_pool == NULL) ||
+	    (NULL != config->response_cmds && 0 == config->response_cmds_len) ||
+	    (NULL != config->unsol_cmds && 0 == config->unsol_cmds_len)) {
 		return -EINVAL;
 	}
 
-	if (data->eol == NULL) {
-		data->eol_len = 0;
-	} else {
-		data->eol_len = strlen(data->eol);
-	}
-
+	/* Assign data to command handler */
 	handler->cmd_handler_data = data;
+
+	/* Assign command process implementation to command handler */
 	handler->process = cmd_handler_process;
 
+	/* Store arguments */
+	data->match_buf = config->match_buf;
+	data->match_buf_len = config->match_buf_len;
+	data->buf_pool = config->buf_pool;
+	data->alloc_timeout = config->alloc_timeout;
+	data->eol = config->eol;
+	data->cmds[CMD_RESP] = config->response_cmds;
+	data->cmds_len[CMD_RESP] = config->response_cmds_len;
+	data->cmds[CMD_UNSOL] = config->unsol_cmds;
+	data->cmds_len[CMD_UNSOL] = config->unsol_cmds_len;
+
+	/* Process end of line */
+	data->eol_len = data->eol == NULL ? 0 : strlen(data->eol);
+
+	/* Store optional user data */
+	data->user_data = config->user_data;
+
+	/* Initialize command handler data members */
 	k_sem_init(&data->sem_tx_lock, 1, 1);
 	k_sem_init(&data->sem_parse_lock, 1, 1);
 

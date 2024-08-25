@@ -7,10 +7,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <ztest.h>
+#include <zephyr/ztest.h>
 
-#include <logging/log.h>
-LOG_MODULE_REGISTER(test_net_dns_sd, LOG_LEVEL_DBG);
+#include <zephyr/net/dns_sd.h>
+#include <zephyr/net/net_context.h>
+#include <zephyr/net/net_pkt.h>
+#include <zephyr/net/socket.h>
 
 #include "dns_pack.h"
 #include "dns_sd.h"
@@ -50,6 +52,9 @@ extern int add_srv_record(const struct dns_sd_rec *inst, uint32_t ttl,
 			  uint16_t *host_offset);
 extern size_t service_proto_size(const struct dns_sd_rec *ref);
 extern bool rec_is_valid(const struct dns_sd_rec *ref);
+extern int setup_dst_addr(int sock, sa_family_t family,
+			  struct sockaddr *dst, socklen_t *dst_len);
+
 
 /** Text for advertised service */
 static const uint8_t nasxxxxxx_text[] = "\x06" "path=/";
@@ -132,7 +137,7 @@ static uint8_t *create_query(const struct dns_sd_rec *inst,
 }
 
 /** Test for @ref label_is_valid */
-static void test_label_is_valid(void)
+ZTEST(dns_sd, test_label_is_valid)
 {
 	zassert_equal(false, label_is_valid(NULL,
 					    DNS_LABEL_MIN_SIZE), "");
@@ -157,7 +162,7 @@ static void test_label_is_valid(void)
 }
 
 /** Test for @ref dns_sd_rec_is_valid */
-static void test_dns_sd_rec_is_valid(void)
+ZTEST(dns_sd, test_dns_sd_rec_is_valid)
 {
 	DNS_SD_REGISTER_TCP_SERVICE(name_min,
 				"x",
@@ -241,7 +246,7 @@ static void test_dns_sd_rec_is_valid(void)
 }
 
 /** Test for @ref creqte_query */
-static void test_create_query(void)
+ZTEST(dns_sd, test_create_query)
 {
 	size_t actual_query_size = -1;
 	uint8_t *actual_query = create_query(&nasxxxxxx,
@@ -263,7 +268,7 @@ static void test_create_query(void)
 }
 
 /** Test for @ref add_ptr_record */
-static void test_add_ptr_record(void)
+ZTEST(dns_sd, test_add_ptr_record)
 {
 	const uint32_t ttl = DNS_SD_PTR_TTL;
 	const uint32_t offset = sizeof(struct dns_header);
@@ -335,7 +340,7 @@ static void test_add_ptr_record(void)
 }
 
 /** Test for @ref add_txt_record */
-static void test_add_txt_record(void)
+ZTEST(dns_sd, test_add_txt_record)
 {
 	const uint32_t ttl = DNS_SD_TXT_TTL;
 	const uint32_t offset = 0;
@@ -373,7 +378,7 @@ static void test_add_txt_record(void)
 }
 
 /** Test for @ref add_srv_record */
-static void test_add_srv_record(void)
+ZTEST(dns_sd, test_add_srv_record)
 {
 	const uint32_t ttl = DNS_SD_SRV_TTL;
 	const uint32_t offset = 0;
@@ -429,7 +434,7 @@ static void test_add_srv_record(void)
 }
 
 /** Test for @ref add_a_record */
-static void test_add_a_record(void)
+ZTEST(dns_sd, test_add_a_record)
 {
 	const uint32_t ttl = DNS_SD_A_TTL;
 	const uint32_t offset = 0;
@@ -467,7 +472,7 @@ static void test_add_a_record(void)
 }
 
 /** Test for @ref add_aaaa_record */
-static void test_add_aaaa_record(void)
+ZTEST(dns_sd, test_add_aaaa_record)
 {
 	const uint32_t ttl = DNS_SD_AAAA_TTL;
 	const uint32_t offset = 0;
@@ -510,7 +515,7 @@ static void test_add_aaaa_record(void)
 }
 
 /** Test for @ref dns_sd_handle_ptr_query */
-static void test_dns_sd_handle_ptr_query(void)
+ZTEST(dns_sd, test_dns_sd_handle_ptr_query)
 {
 	struct in_addr addr = {
 		.s_addr = htonl(IP_ADDR(177, 5, 240, 13)),
@@ -545,7 +550,7 @@ static void test_dns_sd_handle_ptr_query(void)
 		     "dns_sd_handle_ptr_query() failed (%d)",
 		     actual_int);
 
-	zassert_equal(actual_int, expected_int, "");
+	zassert_equal(actual_int, expected_int, "act: %d exp: %d", actual_int, expected_int);
 
 	zassert_mem_equal(actual_rsp, expected_rsp,
 			  MIN(actual_int, expected_int), "");
@@ -570,8 +575,60 @@ static void test_dns_sd_handle_ptr_query(void)
 		sizeof(struct dns_header)), "");
 }
 
+/** Test for @ref dns_sd_handle_ptr_query */
+ZTEST(dns_sd, test_dns_sd_handle_service_type_enum)
+{
+	DNS_SD_REGISTER_TCP_SERVICE(chromecast,
+				"Chromecast-abcd",
+				"_googlecast",
+				"local",
+				DNS_SD_EMPTY_TXT,
+				CONST_PORT);
+
+	struct in_addr addr = {
+		.s_addr = htonl(IP_ADDR(177, 5, 240, 13)),
+	};
+	static uint8_t actual_rsp[512];
+	static uint8_t expected_rsp[] = {
+		0x00, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+		0x00, 0x00, 0x00, 0x09, 0x5f, 0x73, 0x65, 0x72, 0x76,
+		0x69, 0x63, 0x65, 0x73, 0x07, 0x5f, 0x64, 0x6e, 0x73,
+		0x2d, 0x73, 0x64, 0x04, 0x5f, 0x75, 0x64, 0x70, 0x05,
+		0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x0c, 0x00,
+		0x01, 0x00, 0x00, 0x11, 0x94, 0x00, 0x13, 0x0b, 0x5f,
+		0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x63, 0x61, 0x73,
+		0x74, 0x04, 0x5f, 0x74, 0x63, 0x70, 0xc0, 0x23,
+	};
+	int expected_int = sizeof(expected_rsp);
+	int actual_int = dns_sd_handle_service_type_enum(&chromecast,
+						 &addr,
+						 NULL,
+						 &actual_rsp[0],
+						 sizeof(actual_rsp) -
+						 sizeof(struct dns_header));
+
+	zassert_true(actual_int > 0, "dns_sd_handle_service_type_enum() failed (%d)", actual_int);
+
+	zassert_equal(actual_int, expected_int, "act: %d exp: %d", actual_int, expected_int);
+
+	zassert_mem_equal(actual_rsp, expected_rsp, MIN(actual_int, expected_int), "");
+
+	/* show non-advertisement for uninitialized port */
+	nonconst_port = 0;
+	zassert_equal(-EHOSTDOWN,
+		      dns_sd_handle_service_type_enum(&nasxxxxxx_ephemeral, &addr, NULL,
+				&actual_rsp[0], sizeof(actual_rsp) - sizeof(struct dns_header)),
+		      "port zero should not "
+		      "produce any DNS-SD query response");
+
+	zassert_equal(-EINVAL,
+		      dns_sd_handle_service_type_enum(&invalid_dns_sd_record, &addr, NULL,
+			  &actual_rsp[0], sizeof(actual_rsp) - sizeof(struct dns_header)),
+		      "");
+}
+
 /** Test @ref dns_sd_rec_match */
-static void test_dns_sd_rec_match(void)
+ZTEST(dns_sd, test_dns_sd_rec_match)
 {
 	DNS_SD_REGISTER_TCP_SERVICE(record,
 				    "NGINX",
@@ -607,19 +664,170 @@ static void test_dns_sd_rec_match(void)
 	zassert_equal(true, dns_sd_rec_match(&record, &filter_ok), "");
 }
 
-void test_main(void)
+/** Test @ref setup_dst_addr */
+ZTEST(dns_sd, test_setup_dst_addr)
 {
-	ztest_test_suite(dns_sd_tests,
-			 ztest_unit_test(test_label_is_valid),
-			 ztest_unit_test(test_dns_sd_rec_is_valid),
-			 ztest_unit_test(test_create_query),
-			 ztest_unit_test(test_add_ptr_record),
-			 ztest_unit_test(test_add_txt_record),
-			 ztest_unit_test(test_add_srv_record),
-			 ztest_unit_test(test_add_a_record),
-			 ztest_unit_test(test_add_aaaa_record),
-			 ztest_unit_test(test_dns_sd_handle_ptr_query),
-			 ztest_unit_test(test_dns_sd_rec_match));
+	struct net_if *iface;
+	struct sockaddr dst;
+	socklen_t dst_len;
+	socklen_t optlen;
+	int ttl;
 
-	ztest_run_test_suite(dns_sd_tests);
+	iface = net_if_get_first_by_type(&NET_L2_GET_NAME(DUMMY));
+	zassert_not_null(iface, "Interface not available");
+
+	/* IPv4 case */
+	int v4;
+	struct in_addr addr_v4_expect = { { { 224, 0, 0, 251 } } };
+
+	memset(&dst, 0, sizeof(struct sockaddr));
+
+	v4 = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	zassert_true(v4 >= 0, "Create IPv4 UDP context failed (%d)", -errno);
+
+	zassert_equal(0, setup_dst_addr(v4, AF_INET, &dst, &dst_len), "");
+
+	optlen = sizeof(int);
+	(void)zsock_getsockopt(v4, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, &optlen);
+
+	zassert_equal(255, ttl, "TTL invalid (%d vs %d)", 255, ttl);
+	zassert_true(net_ipv4_addr_cmp(&addr_v4_expect,
+				       &net_sin(&dst)->sin_addr), "");
+	zassert_equal(8, dst_len, "");
+
+	(void)zsock_close(v4);
+
+#if defined(CONFIG_NET_IPV6)
+	/* IPv6 case */
+	int v6;
+	struct in6_addr addr_v6_expect = { { { 0xff, 0x02, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0xfb } } };
+
+	memset(&dst, 0, sizeof(struct sockaddr));
+
+	v6 = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	zassert_true(v6 >= 0, "Create IPv6 UDP context failed (%d)", -errno);
+
+	zassert_equal(0, setup_dst_addr(v6, AF_INET6, &dst, &dst_len), "");
+
+	optlen = sizeof(int);
+	(void)zsock_getsockopt(v6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, &optlen);
+
+	zassert_equal(255, ttl, "Hoplimit invalid (%d vs %d)", 255, ttl);
+	zassert_true(net_ipv6_addr_cmp(&addr_v6_expect,
+				       &net_sin6(&dst)->sin6_addr), "");
+	zassert_equal(24, dst_len, "");
+
+	(void)zsock_close(v6);
+#endif
+
+	/* Unknown family case */
+
+	int xx;
+
+	xx = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	zassert_true(xx >= 0, "Create IPV4 udp socket failed");
+
+	zassert_equal(-EPFNOSUPPORT,
+		      setup_dst_addr(xx, AF_PACKET, &dst, &dst_len), "");
 }
+
+/** test for @ref dns_sd_is_service_type_enumeration */
+ZTEST(dns_sd, test_is_service_type_enumeration)
+{
+	static const struct dns_sd_rec filter_ok = {
+		.instance = "_services",
+		.service = "_dns-sd",
+		.proto = "_udp",
+		/* TODO: support additional service domains */
+		.domain = "local",
+		.text = dns_sd_empty_txt,
+		.text_size = sizeof(dns_sd_empty_txt),
+		.port = &dns_sd_port_zero,
+	};
+
+	zassert_true(dns_sd_is_service_type_enumeration(&filter_ok), "");
+
+	static const struct dns_sd_rec filter_nok = {
+		/* not a service_type_enumeration */
+		.instance = "_serv1c3s",   .service = "_dns-sd",
+		.proto = "_udp",	   .domain = "local",
+		.text = dns_sd_empty_txt,  .text_size = sizeof(dns_sd_empty_txt),
+		.port = &dns_sd_port_zero,
+	};
+
+	zassert_false(dns_sd_is_service_type_enumeration(&filter_nok), "");
+}
+
+ZTEST(dns_sd, test_extract_service_type_enumeration)
+{
+	static const uint8_t query[] = {
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x09, 0x5f,
+		0x73, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x73, 0x07, 0x5f, 0x64, 0x6e, 0x73, 0x2d,
+		0x73, 0x64, 0x04, 0x5f, 0x75, 0x64, 0x70, 0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+	};
+
+	struct dns_sd_rec record;
+	char instance[DNS_SD_INSTANCE_MAX_SIZE + 1];
+	char service[DNS_SD_SERVICE_MAX_SIZE + 1];
+	char proto[DNS_SD_PROTO_SIZE + 1];
+	char domain[DNS_SD_DOMAIN_MAX_SIZE + 1];
+	char *label[4];
+	size_t size[] = {
+		ARRAY_SIZE(instance),
+		ARRAY_SIZE(service),
+		ARRAY_SIZE(proto),
+		ARRAY_SIZE(domain),
+	};
+	size_t n = ARRAY_SIZE(label);
+
+	BUILD_ASSERT(ARRAY_SIZE(label) == ARRAY_SIZE(size), "");
+
+	/*
+	 * work around for bug in compliance scripts which say that the array
+	 * should be static const (incorrect)
+	 */
+	label[0] = instance;
+	label[1] = service;
+	label[2] = proto;
+	label[3] = domain;
+
+	zassert_equal(ARRAY_SIZE(query),
+		      dns_sd_query_extract(query, ARRAY_SIZE(query), &record, label, size, &n),
+		      "failed to extract service type enumeration");
+
+	zassert_true(dns_sd_is_service_type_enumeration(&record), "");
+}
+
+ZTEST(dns_sd, test_wildcard_comparison)
+{
+	size_t n_matches = 0;
+	size_t n_records = 0;
+	struct dns_sd_rec filter;
+
+	dns_sd_create_wildcard_filter(&filter);
+
+	DNS_SD_FOREACH(record) {
+		if (!rec_is_valid(record)) {
+			continue;
+		}
+
+		++n_records;
+	}
+
+	DNS_SD_FOREACH(record) {
+		if (!rec_is_valid(record)) {
+			continue;
+		}
+
+		if (dns_sd_rec_match(record, &filter)) {
+			++n_matches;
+		}
+	}
+
+	zassert_true(n_records > 0, "there must be > 0 records");
+	zassert_equal(n_matches, n_records, "wildcard filter does not match "
+		"all records: n_records: %zu n_matches: %zu", n_records, n_matches);
+}
+
+ZTEST_SUITE(dns_sd, NULL, NULL, NULL, NULL, NULL);

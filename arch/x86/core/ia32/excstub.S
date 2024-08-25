@@ -14,8 +14,8 @@
  * and exiting a C exception handler.
  */
 
-#include <arch/x86/ia32/asm.h>
-#include <arch/x86/ia32/arch.h> /* For MK_ISR_NAME */
+#include <zephyr/arch/x86/ia32/asm.h>
+#include <zephyr/arch/x86/ia32/arch.h> /* For MK_ISR_NAME */
 #include <offsets_short.h>
 
 
@@ -45,15 +45,13 @@
  * created by this routine to determine the locations of volatile registers.
  * These tools must be updated to reflect any changes to the stack frame.
  *
- * @return N/A
- *
  * C function prototype:
  *
  * void _exception_enter(uint32_t error_code, void *handler)
  *
  */
 
-SECTION_FUNC(TEXT, _exception_enter)
+SECTION_FUNC(PINNED_TEXT, _exception_enter)
 
 	/*
 	 * The gen_idt tool creates an interrupt-gate descriptor for
@@ -163,12 +161,12 @@ SECTION_FUNC(TEXT, _exception_enter)
 
 	/* ESP is still pointing to the ESF at this point */
 
-	testl	$0x200, __z_arch_esf_t_eflags_OFFSET(%esp)
+	testl	$0x200, __struct_arch_esf_eflags_OFFSET(%esp)
 	je	allDone
 	sti
 
 allDone:
-	pushl	%esp			/* push z_arch_esf_t * parameter */
+	pushl	%esp			/* push struct_arch_esf * parameter */
 	call	*%ecx			/* call exception handler */
 	addl	$0x4, %esp
 
@@ -234,7 +232,7 @@ nestedException:
 	/* Pop of EFLAGS will re-enable interrupts and restore direction flag */
 	KPTI_IRET
 
-SECTION_FUNC(TEXT, _kernel_oops_handler)
+SECTION_FUNC(PINNED_TEXT, _kernel_oops_handler)
 	push $0 /* dummy error code */
 	push $z_x86_do_kernel_oops
 	jmp _exception_enter

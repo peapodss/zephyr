@@ -8,12 +8,15 @@
  * @file
  * @brief Zperf sample.
  */
-#include <usb/usb_device.h>
-#include <net/net_config.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/net/net_config.h>
 
-void main(void)
+#ifdef CONFIG_NET_LOOPBACK_SIMULATE_PACKET_DROP
+#include <zephyr/net/loopback.h>
+#endif
+int main(void)
 {
-#if defined(CONFIG_USB)
+#if defined(CONFIG_USB_DEVICE_STACK)
 	int ret;
 
 	ret = usb_enable(NULL);
@@ -22,5 +25,13 @@ void main(void)
 	}
 
 	(void)net_config_init_app(NULL, "Initializing network");
-#endif /* CONFIG_USB */
+#endif /* CONFIG_USB_DEVICE_STACK */
+#ifdef CONFIG_NET_LOOPBACK_SIMULATE_PACKET_DROP
+	loopback_set_packet_drop_ratio(1);
+#endif
+
+#if defined(CONFIG_NET_DHCPV4) && !defined(CONFIG_NET_CONFIG_SETTINGS)
+	net_dhcpv4_start(net_if_get_default());
+#endif
+	return 0;
 }

@@ -1,21 +1,22 @@
-.. _settings_subsys_sample:
+.. zephyr:code-sample:: settings
+   :name: Settings API
+   :relevant-api: settings settings_rt settings_name_proc
 
-Settings sample
-###############
+   Load and save configuration values using the settings API.
 
 Overview
 ********
 
 This is a simple application demonstrating use of the settings runtime
 configuration module. In this application some configuration values are loaded
-form persistient storage and exported to persistent storage using different
+from persistent storage and exported to persistent storage using different
 settings method. The example shows how to implement module handlers, how to
 register them.
 
 Requirements
 ************
 
-* A board with settings support, for instance: nrf52840dk_nrf52840
+* A board with settings support, for instance: nrf52840dk/nrf52840
 * Or qemu_x86 target
 
 Building and Running

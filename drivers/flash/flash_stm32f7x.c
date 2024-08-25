@@ -5,16 +5,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <device.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
 #include <string.h>
-#include <drivers/flash.h>
-#include <init.h>
+#include <zephyr/drivers/flash.h>
+#include <zephyr/init.h>
+#include <zephyr/sys/barrier.h>
 #include <soc.h>
 
 #include "flash_stm32.h"
-
-#define STM32F7X_SECTOR_MASK		((uint32_t) 0xFFFFFF07)
 
 bool flash_stm32_valid_range(const struct device *dev, off_t offset,
 			     uint32_t len,
@@ -23,6 +22,20 @@ bool flash_stm32_valid_range(const struct device *dev, off_t offset,
 	ARG_UNUSED(write);
 
 	return flash_stm32_range_exists(dev, offset, len);
+}
+
+static inline void flush_cache(FLASH_TypeDef *regs)
+{
+	if (regs->ACR & FLASH_ACR_ARTEN) {
+		regs->ACR &= ~FLASH_ACR_ARTEN;
+		/* Reference manual:
+		 * The ART cache can be flushed only if the ART accelerator
+		 * is disabled (ARTEN = 0).
+		 */
+		regs->ACR |= FLASH_ACR_ARTRST;
+		regs->ACR &= ~FLASH_ACR_ARTRST;
+		regs->ACR |= FLASH_ACR_ARTEN;
+	}
 }
 
 static int write_byte(const struct device *dev, off_t offset, uint8_t val)
@@ -44,12 +57,12 @@ static int write_byte(const struct device *dev, off_t offset, uint8_t val)
 	regs->CR = (regs->CR & CR_PSIZE_MASK) |
 		   FLASH_PSIZE_BYTE | FLASH_CR_PG;
 	/* flush the register write */
-	__DSB();
+	barrier_dsync_fence_full();
 
 	/* write the data */
-	*((uint8_t *) offset + CONFIG_FLASH_BASE_ADDRESS) = val;
+	*((uint8_t *) offset + FLASH_STM32_BASE_ADDRESS) = val;
 	/* flush the register write */
-	__DSB();
+	barrier_dsync_fence_full();
 
 	rc = flash_stm32_wait_flash_idle(dev);
 	regs->CR &= (~FLASH_CR_PG);
@@ -87,13 +100,13 @@ static int erase_sector(const struct device *dev, uint32_t sector)
 #endif /* CONFIG_FLASH_SIZE */
 #endif /* defined(FLASH_OPTCR_nDBANK) && FLASH_SECTOR_TOTAL == 24 */
 
-	regs->CR = (regs->CR & (CR_PSIZE_MASK | STM32F7X_SECTOR_MASK)) |
+	regs->CR = (regs->CR & ~(FLASH_CR_PSIZE | FLASH_CR_SNB)) |
 		   FLASH_PSIZE_BYTE |
 		   FLASH_CR_SER |
 		   (sector << FLASH_CR_SNB_Pos) |
 		   FLASH_CR_STRT;
 	/* flush the register write */
-	__DSB();
+	barrier_dsync_fence_full();
 
 	rc = flash_stm32_wait_flash_idle(dev);
 	regs->CR &= ~(FLASH_CR_SER | FLASH_CR_SNB);
@@ -146,6 +159,48 @@ int flash_stm32_write_range(const struct device *dev, unsigned int offset,
 	return rc;
 }
 
+static __unused int write_optb(const struct device *dev, uint32_t mask,
+			       uint32_t value)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+	int rc;
+
+	if (regs->OPTCR & FLASH_OPTCR_OPTLOCK) {
+		return -EIO;
+	}
+
+	if ((regs->OPTCR & mask) == value) {
+		return 0;
+	}
+
+	rc = flash_stm32_wait_flash_idle(dev);
+	if (rc < 0) {
+		return rc;
+	}
+
+	regs->OPTCR = (regs->OPTCR & ~mask) | value;
+	regs->OPTCR |= FLASH_OPTCR_OPTSTRT;
+
+	/* Make sure previous write is completed. */
+	barrier_dsync_fence_full();
+
+	return flash_stm32_wait_flash_idle(dev);
+}
+
+#if defined(CONFIG_FLASH_STM32_READOUT_PROTECTION)
+uint8_t flash_stm32_get_rdp_level(const struct device *dev)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+
+	return (regs->OPTCR & FLASH_OPTCR_RDP_Msk) >> FLASH_OPTCR_RDP_Pos;
+}
+
+void flash_stm32_set_rdp_level(const struct device *dev, uint8_t level)
+{
+	write_optb(dev, FLASH_OPTCR_RDP_Msk,
+		(uint32_t)level << FLASH_OPTCR_RDP_Pos);
+}
+#endif /* CONFIG_FLASH_STM32_READOUT_PROTECTION */
 
 /* Some SoC can run in single or dual bank mode, others can't.
  * Different SoC flash layouts are specified in various reference

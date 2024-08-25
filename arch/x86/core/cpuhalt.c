@@ -3,10 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr.h>
-#include <tracing/tracing.h>
-#include <arch/cpu.h>
+#include <zephyr/kernel.h>
+#include <zephyr/tracing/tracing.h>
+#include <zephyr/arch/cpu.h>
 
+#ifndef CONFIG_ARCH_HAS_CUSTOM_CPU_IDLE
+__pinned_func
 void arch_cpu_idle(void)
 {
 	sys_trace_idle();
@@ -14,7 +16,10 @@ void arch_cpu_idle(void)
 	    "sti\n\t"
 	    "hlt\n\t");
 }
+#endif
 
+#ifndef CONFIG_ARCH_HAS_CUSTOM_CPU_ATOMIC_IDLE
+__pinned_func
 void arch_cpu_atomic_idle(unsigned int key)
 {
 	sys_trace_idle();
@@ -40,3 +45,4 @@ void arch_cpu_atomic_idle(unsigned int key)
 		__asm__ volatile("cli");
 	}
 }
+#endif

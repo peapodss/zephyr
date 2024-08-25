@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2017 Wind River Systems, Inc.
+ * Copyright (c) 2023 Arm Limited (or its affiliates). All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,15 +15,15 @@
  * constructs.
  */
 
-#include <kernel.h>
-#include <kernel_structs.h>
+#include <zephyr/kernel.h>
+#include <zephyr/kernel_structs.h>
 #include <kernel_internal.h>
 #include <wait_q.h>
 #include <ksched.h>
-#include <syscall_handler.h>
-#include <sys/dlist.h>
-#include <sys/util.h>
-#include <sys/__assert.h>
+#include <zephyr/internal/syscall_handler.h>
+#include <zephyr/sys/dlist.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/sys/__assert.h>
 #include <stdbool.h>
 
 /* Single subsystem lock.  Locking per-event would be better on highly
@@ -54,6 +55,8 @@ void k_poll_event_init(struct k_poll_event *event, uint32_t type,
 	event->mode = mode;
 	event->unused = 0U;
 	event->obj = obj;
+
+	SYS_PORT_TRACING_FUNC(k_poll_api, event_init, event);
 }
 
 /* must be called with interrupts locked */
@@ -78,6 +81,19 @@ static inline bool is_condition_met(struct k_poll_event *event, uint32_t *state)
 			return true;
 		}
 		break;
+	case K_POLL_TYPE_MSGQ_DATA_AVAILABLE:
+		if (event->msgq->used_msgs > 0) {
+			*state = K_POLL_STATE_MSGQ_DATA_AVAILABLE;
+			return true;
+		}
+		break;
+#ifdef CONFIG_PIPES
+	case K_POLL_TYPE_PIPE_DATA_AVAILABLE:
+		if (k_pipe_read_avail(event->pipe)) {
+			*state = K_POLL_STATE_PIPE_DATA_AVAILABLE;
+			return true;
+		}
+#endif /* CONFIG_PIPES */
 	case K_POLL_TYPE_IGNORE:
 		break;
 	default:
@@ -100,15 +116,15 @@ static inline void add_event(sys_dlist_t *events, struct k_poll_event *event,
 
 	pending = (struct k_poll_event *)sys_dlist_peek_tail(events);
 	if ((pending == NULL) ||
-	    z_is_t1_higher_prio_than_t2(poller_thread(pending->poller),
-					poller_thread(poller))) {
+		(z_sched_prio_cmp(poller_thread(pending->poller),
+							   poller_thread(poller)) > 0)) {
 		sys_dlist_append(events, &event->_node);
 		return;
 	}
 
 	SYS_DLIST_FOR_EACH_CONTAINER(events, pending, _node) {
-		if (z_is_t1_higher_prio_than_t2(poller_thread(poller),
-					poller_thread(pending->poller))) {
+		if (z_sched_prio_cmp(poller_thread(poller),
+					poller_thread(pending->poller)) > 0) {
 			sys_dlist_insert(&pending->_node, &event->_node);
 			return;
 		}
@@ -118,7 +134,7 @@ static inline void add_event(sys_dlist_t *events, struct k_poll_event *event,
 }
 
 /* must be called with interrupts locked */
-static inline int register_event(struct k_poll_event *event,
+static inline void register_event(struct k_poll_event *event,
 				 struct z_poller *poller)
 {
 	switch (event->type) {
@@ -134,6 +150,16 @@ static inline int register_event(struct k_poll_event *event,
 		__ASSERT(event->signal != NULL, "invalid poll signal\n");
 		add_event(&event->signal->poll_events, event, poller);
 		break;
+	case K_POLL_TYPE_MSGQ_DATA_AVAILABLE:
+		__ASSERT(event->msgq != NULL, "invalid message queue\n");
+		add_event(&event->msgq->poll_events, event, poller);
+		break;
+#ifdef CONFIG_PIPES
+	case K_POLL_TYPE_PIPE_DATA_AVAILABLE:
+		__ASSERT(event->pipe != NULL, "invalid pipe\n");
+		add_event(&event->pipe->poll_events, event, poller);
+		break;
+#endif /* CONFIG_PIPES */
 	case K_POLL_TYPE_IGNORE:
 		/* nothing to do */
 		break;
@@ -143,30 +169,38 @@ static inline int register_event(struct k_poll_event *event,
 	}
 
 	event->poller = poller;
-
-	return 0;
 }
 
 /* must be called with interrupts locked */
 static inline void clear_event_registration(struct k_poll_event *event)
 {
-	bool remove = false;
+	bool remove_event = false;
 
 	event->poller = NULL;
 
 	switch (event->type) {
 	case K_POLL_TYPE_SEM_AVAILABLE:
 		__ASSERT(event->sem != NULL, "invalid semaphore\n");
-		remove = true;
+		remove_event = true;
 		break;
 	case K_POLL_TYPE_DATA_AVAILABLE:
 		__ASSERT(event->queue != NULL, "invalid queue\n");
-		remove = true;
+		remove_event = true;
 		break;
 	case K_POLL_TYPE_SIGNAL:
 		__ASSERT(event->signal != NULL, "invalid poll signal\n");
-		remove = true;
+		remove_event = true;
 		break;
+	case K_POLL_TYPE_MSGQ_DATA_AVAILABLE:
+		__ASSERT(event->msgq != NULL, "invalid message queue\n");
+		remove_event = true;
+		break;
+#ifdef CONFIG_PIPES
+	case K_POLL_TYPE_PIPE_DATA_AVAILABLE:
+		__ASSERT(event->pipe != NULL, "invalid pipe\n");
+		remove_event = true;
+		break;
+#endif /* CONFIG_PIPES */
 	case K_POLL_TYPE_IGNORE:
 		/* nothing to do */
 		break;
@@ -174,7 +208,7 @@ static inline void clear_event_registration(struct k_poll_event *event)
 		__ASSERT(false, "invalid event type\n");
 		break;
 	}
-	if (remove && sys_dnode_is_linked(&event->_node)) {
+	if (remove_event && sys_dnode_is_linked(&event->_node)) {
 		sys_dlist_remove(&event->_node);
 	}
 }
@@ -213,12 +247,14 @@ static inline int register_events(struct k_poll_event *events,
 			set_event_ready(&events[ii], state);
 			poller->is_polling = false;
 		} else if (!just_check && poller->is_polling) {
-			int rc = register_event(&events[ii], poller);
-			if (rc == 0) {
-				events_registered += 1;
-			} else {
-				__ASSERT(false, "unexpected return code\n");
-			}
+			register_event(&events[ii], poller);
+			events_registered += 1;
+		} else {
+			/* Event is not one of those identified in is_condition_met()
+			 * catching non-polling events, or is marked for just check,
+			 * or not marked for polling. No action needed.
+			 */
+			;
 		}
 		k_spin_unlock(&lock, key);
 	}
@@ -234,10 +270,6 @@ static int signal_poller(struct k_poll_event *event, uint32_t state)
 
 	if (!z_is_thread_pending(thread)) {
 		return 0;
-	}
-
-	if (z_is_thread_timeout_expired(thread)) {
-		return -EAGAIN;
 	}
 
 	z_unpend_thread(thread);
@@ -267,6 +299,8 @@ int z_impl_k_poll(struct k_poll_event *events, int num_events,
 	__ASSERT(events != NULL, "NULL events\n");
 	__ASSERT(num_events >= 0, "<0 events\n");
 
+	SYS_PORT_TRACING_FUNC_ENTER(k_poll_api, poll, events);
+
 	events_registered = register_events(events, num_events, poller,
 					    K_TIMEOUT_EQ(timeout, K_NO_WAIT));
 
@@ -280,6 +314,9 @@ int z_impl_k_poll(struct k_poll_event *events, int num_events,
 	if (!poller->is_polling) {
 		clear_event_registrations(events, events_registered, key);
 		k_spin_unlock(&lock, key);
+
+		SYS_PORT_TRACING_FUNC_EXIT(k_poll_api, poll, events, 0);
+
 		return 0;
 	}
 
@@ -287,10 +324,13 @@ int z_impl_k_poll(struct k_poll_event *events, int num_events,
 
 	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
 		k_spin_unlock(&lock, key);
+
+		SYS_PORT_TRACING_FUNC_EXIT(k_poll_api, poll, events, -EAGAIN);
+
 		return -EAGAIN;
 	}
 
-	_wait_q_t wait_q = Z_WAIT_Q_INIT(&wait_q);
+	static _wait_q_t wait_q = Z_WAIT_Q_INIT(&wait_q);
 
 	int swap_rc = z_pend_curr(&lock, key, &wait_q, timeout);
 
@@ -307,6 +347,8 @@ int z_impl_k_poll(struct k_poll_event *events, int num_events,
 	clear_event_registrations(events, events_registered, key);
 	k_spin_unlock(&lock, key);
 
+	SYS_PORT_TRACING_FUNC_EXIT(k_poll_api, poll, events, swap_rc);
+
 	return swap_rc;
 }
 
@@ -322,11 +364,11 @@ static inline int z_vrfy_k_poll(struct k_poll_event *events,
 	/* Validate the events buffer and make a copy of it in an
 	 * allocated kernel-side buffer.
 	 */
-	if (Z_SYSCALL_VERIFY(num_events >= 0)) {
+	if (K_SYSCALL_VERIFY(num_events >= 0)) {
 		ret = -EINVAL;
 		goto out;
 	}
-	if (Z_SYSCALL_VERIFY_MSG(!u32_mul_overflow(num_events,
+	if (K_SYSCALL_VERIFY_MSG(!u32_mul_overflow(num_events,
 						   sizeof(struct k_poll_event),
 						   &bounds),
 				 "num_events too large")) {
@@ -340,7 +382,7 @@ static inline int z_vrfy_k_poll(struct k_poll_event *events,
 	}
 
 	key = k_spin_lock(&lock);
-	if (Z_SYSCALL_MEMORY_WRITE(events, bounds)) {
+	if (K_SYSCALL_MEMORY_WRITE(events, bounds)) {
 		k_spin_unlock(&lock, key);
 		goto oops_free;
 	}
@@ -351,7 +393,7 @@ static inline int z_vrfy_k_poll(struct k_poll_event *events,
 	for (int i = 0; i < num_events; i++) {
 		struct k_poll_event *e = &events_copy[i];
 
-		if (Z_SYSCALL_VERIFY(e->mode == K_POLL_MODE_NOTIFY_ONLY)) {
+		if (K_SYSCALL_VERIFY(e->mode == K_POLL_MODE_NOTIFY_ONLY)) {
 			ret = -EINVAL;
 			goto out_free;
 		}
@@ -360,14 +402,22 @@ static inline int z_vrfy_k_poll(struct k_poll_event *events,
 		case K_POLL_TYPE_IGNORE:
 			break;
 		case K_POLL_TYPE_SIGNAL:
-			Z_OOPS(Z_SYSCALL_OBJ(e->signal, K_OBJ_POLL_SIGNAL));
+			K_OOPS(K_SYSCALL_OBJ(e->signal, K_OBJ_POLL_SIGNAL));
 			break;
 		case K_POLL_TYPE_SEM_AVAILABLE:
-			Z_OOPS(Z_SYSCALL_OBJ(e->sem, K_OBJ_SEM));
+			K_OOPS(K_SYSCALL_OBJ(e->sem, K_OBJ_SEM));
 			break;
 		case K_POLL_TYPE_DATA_AVAILABLE:
-			Z_OOPS(Z_SYSCALL_OBJ(e->queue, K_OBJ_QUEUE));
+			K_OOPS(K_SYSCALL_OBJ(e->queue, K_OBJ_QUEUE));
 			break;
+		case K_POLL_TYPE_MSGQ_DATA_AVAILABLE:
+			K_OOPS(K_SYSCALL_OBJ(e->msgq, K_OBJ_MSGQ));
+			break;
+#ifdef CONFIG_PIPES
+		case K_POLL_TYPE_PIPE_DATA_AVAILABLE:
+			K_OOPS(K_SYSCALL_OBJ(e->pipe, K_OBJ_PIPE));
+			break;
+#endif /* CONFIG_PIPES */
 		default:
 			ret = -EINVAL;
 			goto out_free;
@@ -382,10 +432,10 @@ out:
 	return ret;
 oops_free:
 	k_free(events_copy);
-	Z_OOPS(1);
+	K_OOPS(1);
 }
-#include <syscalls/k_poll_mrsh.c>
-#endif
+#include <zephyr/syscalls/k_poll_mrsh.c>
+#endif /* CONFIG_USERSPACE */
 
 /* must be called with interrupts locked */
 static int signal_poll_event(struct k_poll_event *event, uint32_t state)
@@ -393,11 +443,14 @@ static int signal_poll_event(struct k_poll_event *event, uint32_t state)
 	struct z_poller *poller = event->poller;
 	int retcode = 0;
 
-	if (poller) {
+	if (poller != NULL) {
 		if (poller->mode == MODE_POLL) {
 			retcode = signal_poller(event, state);
 		} else if (poller->mode == MODE_TRIGGERED) {
 			retcode = signal_triggered_work(event, state);
+		} else {
+			/* Poller is not poll or triggered mode. No action needed.*/
+			;
 		}
 
 		poller->is_polling = false;
@@ -414,86 +467,105 @@ static int signal_poll_event(struct k_poll_event *event, uint32_t state)
 void z_handle_obj_poll_events(sys_dlist_t *events, uint32_t state)
 {
 	struct k_poll_event *poll_event;
+	k_spinlock_key_t key = k_spin_lock(&lock);
 
 	poll_event = (struct k_poll_event *)sys_dlist_get(events);
 	if (poll_event != NULL) {
 		(void) signal_poll_event(poll_event, state);
 	}
+
+	k_spin_unlock(&lock, key);
 }
 
-void z_impl_k_poll_signal_init(struct k_poll_signal *signal)
+void z_impl_k_poll_signal_init(struct k_poll_signal *sig)
 {
-	sys_dlist_init(&signal->poll_events);
-	signal->signaled = 0U;
-	/* signal->result is left unitialized */
-	z_object_init(signal);
+	sys_dlist_init(&sig->poll_events);
+	sig->signaled = 0U;
+	/* signal->result is left uninitialized */
+	k_object_init(sig);
+
+	SYS_PORT_TRACING_FUNC(k_poll_api, signal_init, sig);
 }
 
 #ifdef CONFIG_USERSPACE
-static inline void z_vrfy_k_poll_signal_init(struct k_poll_signal *signal)
+static inline void z_vrfy_k_poll_signal_init(struct k_poll_signal *sig)
 {
-	Z_OOPS(Z_SYSCALL_OBJ_INIT(signal, K_OBJ_POLL_SIGNAL));
-	z_impl_k_poll_signal_init(signal);
+	K_OOPS(K_SYSCALL_OBJ_INIT(sig, K_OBJ_POLL_SIGNAL));
+	z_impl_k_poll_signal_init(sig);
 }
-#include <syscalls/k_poll_signal_init_mrsh.c>
-#endif
+#include <zephyr/syscalls/k_poll_signal_init_mrsh.c>
+#endif /* CONFIG_USERSPACE */
 
-void z_impl_k_poll_signal_check(struct k_poll_signal *signal,
+void z_impl_k_poll_signal_reset(struct k_poll_signal *sig)
+{
+	sig->signaled = 0U;
+
+	SYS_PORT_TRACING_FUNC(k_poll_api, signal_reset, sig);
+}
+
+void z_impl_k_poll_signal_check(struct k_poll_signal *sig,
 			       unsigned int *signaled, int *result)
 {
-	*signaled = signal->signaled;
-	*result = signal->result;
+	*signaled = sig->signaled;
+	*result = sig->result;
+
+	SYS_PORT_TRACING_FUNC(k_poll_api, signal_check, sig);
 }
 
 #ifdef CONFIG_USERSPACE
-void z_vrfy_k_poll_signal_check(struct k_poll_signal *signal,
+void z_vrfy_k_poll_signal_check(struct k_poll_signal *sig,
 			       unsigned int *signaled, int *result)
 {
-	Z_OOPS(Z_SYSCALL_OBJ(signal, K_OBJ_POLL_SIGNAL));
-	Z_OOPS(Z_SYSCALL_MEMORY_WRITE(signaled, sizeof(unsigned int)));
-	Z_OOPS(Z_SYSCALL_MEMORY_WRITE(result, sizeof(int)));
-	z_impl_k_poll_signal_check(signal, signaled, result);
+	K_OOPS(K_SYSCALL_OBJ(sig, K_OBJ_POLL_SIGNAL));
+	K_OOPS(K_SYSCALL_MEMORY_WRITE(signaled, sizeof(unsigned int)));
+	K_OOPS(K_SYSCALL_MEMORY_WRITE(result, sizeof(int)));
+	z_impl_k_poll_signal_check(sig, signaled, result);
 }
-#include <syscalls/k_poll_signal_check_mrsh.c>
-#endif
+#include <zephyr/syscalls/k_poll_signal_check_mrsh.c>
+#endif /* CONFIG_USERSPACE */
 
-int z_impl_k_poll_signal_raise(struct k_poll_signal *signal, int result)
+int z_impl_k_poll_signal_raise(struct k_poll_signal *sig, int result)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
 	struct k_poll_event *poll_event;
 
-	signal->result = result;
-	signal->signaled = 1U;
+	sig->result = result;
+	sig->signaled = 1U;
 
-	poll_event = (struct k_poll_event *)sys_dlist_get(&signal->poll_events);
+	poll_event = (struct k_poll_event *)sys_dlist_get(&sig->poll_events);
 	if (poll_event == NULL) {
 		k_spin_unlock(&lock, key);
+
+		SYS_PORT_TRACING_FUNC(k_poll_api, signal_raise, sig, 0);
+
 		return 0;
 	}
 
 	int rc = signal_poll_event(poll_event, K_POLL_STATE_SIGNALED);
+
+	SYS_PORT_TRACING_FUNC(k_poll_api, signal_raise, sig, rc);
 
 	z_reschedule(&lock, key);
 	return rc;
 }
 
 #ifdef CONFIG_USERSPACE
-static inline int z_vrfy_k_poll_signal_raise(struct k_poll_signal *signal,
+static inline int z_vrfy_k_poll_signal_raise(struct k_poll_signal *sig,
 					     int result)
 {
-	Z_OOPS(Z_SYSCALL_OBJ(signal, K_OBJ_POLL_SIGNAL));
-	return z_impl_k_poll_signal_raise(signal, result);
+	K_OOPS(K_SYSCALL_OBJ(sig, K_OBJ_POLL_SIGNAL));
+	return z_impl_k_poll_signal_raise(sig, result);
 }
-#include <syscalls/k_poll_signal_raise_mrsh.c>
+#include <zephyr/syscalls/k_poll_signal_raise_mrsh.c>
 
-static inline void z_vrfy_k_poll_signal_reset(struct k_poll_signal *signal)
+static inline void z_vrfy_k_poll_signal_reset(struct k_poll_signal *sig)
 {
-	Z_OOPS(Z_SYSCALL_OBJ(signal, K_OBJ_POLL_SIGNAL));
-	z_impl_k_poll_signal_reset(signal);
+	K_OOPS(K_SYSCALL_OBJ(sig, K_OBJ_POLL_SIGNAL));
+	z_impl_k_poll_signal_reset(sig);
 }
-#include <syscalls/k_poll_signal_reset_mrsh.c>
+#include <zephyr/syscalls/k_poll_signal_reset_mrsh.c>
 
-#endif
+#endif /* CONFIG_USERSPACE */
 
 static void triggered_work_handler(struct k_work *work)
 {
@@ -528,6 +600,9 @@ static void triggered_work_expiration_handler(struct _timeout *timeout)
 	k_work_submit_to_queue(twork->workq, &twork->work);
 }
 
+extern int z_work_submit_to_queue(struct k_work_q *queue,
+			 struct k_work *work);
+
 static int signal_triggered_work(struct k_poll_event *event, uint32_t status)
 {
 	struct z_poller *poller = event->poller;
@@ -539,7 +614,7 @@ static int signal_triggered_work(struct k_poll_event *event, uint32_t status)
 
 		z_abort_timeout(&twork->timeout);
 		twork->poll_result = 0;
-		k_work_submit_to_queue(work_q, &twork->work);
+		z_work_submit_to_queue(work_q, &twork->work);
 	}
 
 	return 0;
@@ -578,10 +653,14 @@ static int triggered_work_cancel(struct k_work_poll *work,
 void k_work_poll_init(struct k_work_poll *work,
 		      k_work_handler_t handler)
 {
+	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_work_poll, init, work);
+
 	*work = (struct k_work_poll) {};
 	k_work_init(&work->work, triggered_work_handler);
 	work->real_handler = handler;
 	z_init_timeout(&work->timeout);
+
+	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_work_poll, init, work);
 }
 
 int k_work_poll_submit_to_queue(struct k_work_q *work_q,
@@ -598,7 +677,9 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
 	__ASSERT(events != NULL, "NULL events\n");
 	__ASSERT(num_events > 0, "zero events\n");
 
-	/* Take overship of the work if it is possible. */
+	SYS_PORT_TRACING_FUNC_ENTER(k_work_poll, submit_to_queue, work_q, work, timeout);
+
+	/* Take ownership of the work if it is possible. */
 	key = k_spin_lock(&lock);
 	if (work->workq != NULL) {
 		if (work->workq == work_q) {
@@ -607,10 +688,18 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
 			retval = triggered_work_cancel(work, key);
 			if (retval < 0) {
 				k_spin_unlock(&lock, key);
+
+				SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, submit_to_queue, work_q,
+					work, timeout, retval);
+
 				return retval;
 			}
 		} else {
 			k_spin_unlock(&lock, key);
+
+			SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, submit_to_queue, work_q,
+				work, timeout, -EADDRINUSE);
+
 			return -EADDRINUSE;
 		}
 	}
@@ -641,10 +730,6 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
 		__ASSERT(num_events == events_registered,
 			 "Some events were not registered!\n");
 
-#ifdef CONFIG_LEGACY_TIMEOUT_API
-		timeout = k_ms_to_ticks_ceil32(timeout);
-#endif
-
 		/* Setup timeout if such action is requested */
 		if (!K_TIMEOUT_EQ(timeout, K_FOREVER)) {
 			z_add_timeout(&work->timeout,
@@ -655,6 +740,9 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
 		/* From now, any event will result in submitted work. */
 		work->poller.mode = MODE_TRIGGERED;
 		k_spin_unlock(&lock, key);
+
+		SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, submit_to_queue, work_q, work, timeout, 0);
+
 		return 0;
 	}
 
@@ -683,7 +771,24 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
 	/* Submit work. */
 	k_work_submit_to_queue(work_q, &work->work);
 
+	SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, submit_to_queue, work_q, work, timeout, 0);
+
 	return 0;
+}
+
+int k_work_poll_submit(struct k_work_poll *work,
+				     struct k_poll_event *events,
+				     int num_events,
+				     k_timeout_t timeout)
+{
+	SYS_PORT_TRACING_FUNC_ENTER(k_work_poll, submit, work, timeout);
+
+	int ret = k_work_poll_submit_to_queue(&k_sys_work_q, work,
+								events, num_events, timeout);
+
+	SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, submit, work, timeout, ret);
+
+	return ret;
 }
 
 int k_work_poll_cancel(struct k_work_poll *work)
@@ -691,14 +796,20 @@ int k_work_poll_cancel(struct k_work_poll *work)
 	k_spinlock_key_t key;
 	int retval;
 
+	SYS_PORT_TRACING_FUNC_ENTER(k_work_poll, cancel, work);
+
 	/* Check if the work was submitted. */
 	if (work == NULL || work->workq == NULL) {
+		SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, cancel, work, -EINVAL);
+
 		return -EINVAL;
 	}
 
 	key = k_spin_lock(&lock);
 	retval = triggered_work_cancel(work, key);
 	k_spin_unlock(&lock, key);
+
+	SYS_PORT_TRACING_FUNC_EXIT(k_work_poll, cancel, work, retval);
 
 	return retval;
 }

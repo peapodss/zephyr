@@ -5,8 +5,7 @@
  */
 
 #include <arm/armv7-m.dtsi>
-
-#include "viper-common.dtsi"
+#include <broadcom/viper-common.dtsi>
 
 / {
 	cpus {
@@ -23,7 +22,6 @@
 			mpu: mpu@e000ed90 {
 				compatible = "arm,armv7m-mpu";
 				reg = <0xe000ed90 0x40>;
-				arm,num-mpu-regions = <16>;
 			};
 		};
 	};
@@ -38,12 +36,17 @@
 };
 
 &uart1 {
-	interrupts = <197 3>;
+	interrupts = <203 3>;
 };
 
 &pcie0_ep {
 	interrupt-parent = <&nvic>;
-	interrupts = <44 3>, <46 3>, <98 3>, <123 3>, <215 3>;
+	interrupts = <44 3>, <46 3>, <98 3>, <99 3>, <215 3>;
 	interrupt-names = "perst", "perst_inband", "flr",
 			  "snoop_irq1", "pcie_pmon_lite";
+};
+
+&paxdma {
+	interrupt-parent = <&nvic>;
+	interrupts = <228 3>;
 };

@@ -33,7 +33,7 @@ in detail. As depicted in Figure 1, these main steps are:
    countermeasures designed. Their correct implementation and the
    validity of the threat models are checked by code reviews.
    Finally, a process shall be defined for reporting, classifying,
-   and mitigating security issues..
+   and mitigating security issues.
 
 3. **Security Certification:** Defines the certifiable part of the
    Zephyr RTOS. This includes an evaluation target, its assets, and
@@ -97,21 +97,21 @@ The three major security measures currently implemented are:
 
 -  **Security** **Functionality** with a focus on cryptographic
    algorithms and protocols. Support for cryptographic hardware is
-   scoped for future releases.The Zephyr runtime architecture is a
-   monolithic binary and removes the need for dynamic loaders ,
+   scoped for future releases. The Zephyr runtime architecture is a
+   monolithic binary and removes the need for dynamic loaders,
    thereby reducing the exposed attack surface.
 
 -  **Quality Assurance** is driven by using a development process that
    requires all code to be reviewed before being committed to the
    common repository. Furthermore, the reuse of proven building
    blocks such as network stacks increases the overall quality level
-   and guarantees stable APIs. Static code analyses are provided by
-   Coverity Scan.
+   and guarantees stable APIs. Static code analyses provide additional
+   quality checks.
 
 -  **Execution Protection** including thread separation, stack and
    memory protection is currently available in the upstream
    Zephyr RTOS starting with version 1.9.0 (stack protection).  Memory
-   protection and thread separation was added in version 1.10.0 for X86
+   protection and thread separation were added in version 1.10.0 for X86
    and in version 1.11.0 for ARM and ARC.
 
 These topics are discussed in more detail in the following subsections.
@@ -122,14 +122,12 @@ Security Functionality
 The security functionality in Zephyr hinges mainly on the inclusion of
 cryptographic algorithms, and on its monolithic system design.
 
-The cryptographic features are provided through a set of cryptographic
-libraries. Applications can choose TinyCrypt2 or mbedTLS based on their
-needs. TinyCrypt2 supports key cryptographic algorithms required by the
-connectivity stacks. Tinycrypt2, however, only provides a limited set of
-algorithms. mbedTLS supports a wider range of algorithms, but at the
-cost of additional requirements such as malloc support. Applications can
-choose the solution that matches their individual requirements. Future
-work may include APIs to abstract the underlying crypto library choice.
+The cryptographic features are provided through PSA Crypto, with
+mbedTLS as the underlying implementation. Applications leverage PSA
+Crypto APIs, ensuring a standardized and secure approach to
+cryptographic operations. mbedTLS, as the implementation of PSA
+Crypto, supports a wide range of cryptographic algorithms, making it
+suitable for various application requirements.
 
 APIs for vendor specific cryptographic IPs in both hardware and software
 are planned, including secure key storage in the form of secure access
@@ -147,7 +145,7 @@ protection mechanisms are provided to protect against stack overruns.
 In addition, applications can take advantage of thread separation
 features to split the system into privileged and unprivileged execution
 environments.  Memory protection features provide the capability to
-partition system resources (memory, peripheral address space, etc) and
+partition system resources (memory, peripheral address space, etc.) and
 assign resources to individual threads or groups of threads.  Stack,
 thread execution level, and memory protection constraints are enforced
 at the time of context switch.
@@ -180,18 +178,16 @@ the experience of the reviewer. Especially for security relevant code,
 concrete and detailed guidelines need to be developed and aligned with
 the developers (see: :ref:`secure code`).
 
-Static code analyses are run on the Zephyr code tree on a regular basis
-using the open source Coverity Scan tool. Coverity Scan now includes
-complexity analysis.
+Static code analyses are run on the Zephyr code tree on a regular basis,
+see :ref:`static_analysis`.
 
-Bug and issue tracking and management is performed using Jira. The term
+Bug and issue tracking and management is performed using Github. The term
 "survivability" was coined to cover pro-active security tasks such as
-security issue categorization and management. Initial effort has been
-started on the definition of vulnerability categorization and mitigation
-processes within Jira.
+security issue categorization and management. A problem identified as
+vulnerability is managed within Github security advisories.
 
-Issues determined by Coverity should have more stringent reviews before
-they are closed as non issues (at least another person educated in
+Issues determined by static analyses should have more stringent reviews before
+they are closed as non-issues (at least another person educated in
 security processes need to agree on non-issue before closing).
 
 A security subcommittee has been formed to develop a security process in
@@ -269,7 +265,7 @@ important submodules. For each of the modules, a dedicated architecture
 document shall be created and evaluated against the implementation.
 These documents shall serve as an entry point to new developers and as a
 basis for the security architecture. Please refer to the
-:ref:`Zephyr subsystem documentation <api_reference>` for
+:ref:`Zephyr subsystem documentation <os_services>` for
 detailed information.
 
 Secure Coding
@@ -433,12 +429,12 @@ Lifecycle management contains several aspects:
    cycle, documenting releases, and maintaining a record of known
    vulnerabilities and mitigations. Especially for certification
    purposes the integrity of the release needs to be ensured in a
-   way that later manipulation (e.g. inserting of backdoors, etc.)
+   way that later manipulation (e.g., inserting of backdoors, etc.)
    can be easily detected.
 
 -  **Rights management and NDAs:** if required by the chosen
    certification, the confidentiality and integrity of the system
-   needs to be ensured by an appropriate rights management (e.g.
+   needs to be ensured by an appropriate rights management (e.g.,
    separate source code repository) and non-disclosure agreements
    between the relevant parties. In case of a repository shared
    between several parties, measures shall be taken that no
@@ -478,8 +474,8 @@ The software security process includes:
    towards a security certification if required.
 
 -  **Security Issue Management** encompasses the evaluation of potential
-   system vulnerabilities and their mitigation as described in the
-   `Security Issue Management`_ Section.
+   system vulnerabilities and their mitigation as described in
+   :ref:`Security Issue Management <reporting>`.
 
 These criteria and tasks need to be integrated into the development
 process for secure software and shall be automated wherever possible. On
@@ -523,7 +519,7 @@ this, the individual steps include:
    confidentiality, manipulation of user data, etc.
 
 3. **Definition of requirements** regarding security and protection of
-   the assets, e.g. countermeasures or memory protection schemes.
+   the assets, e.g., countermeasures or memory protection schemes.
 
 The security architecture shall be harmonized with the existing system
 architecture and implementation to determine potential deviations and
@@ -536,186 +532,8 @@ considered and documented.
 Security Vulnerability Reporting
 ================================
 
-Vulnerabilities to the Zephyr project may be reported via email to the
-vulnerabilities@zephyrproject.org mailing list.  These reports will be
-acknowledged and analyzed by the security response team within 1 week.
-Each vulnerability will be entered into the Zephyr Project security
-tracking JIRA_.  The original submitter will be granted permission to
-view the issues that they have reported.
-
-.. _JIRA: https://zephyrprojectsec.atlassian.net/
-
-Reporters may also submit reports by directly submitting them to the
-Zephyr Product security tracking JIRA.
-
-Security Issue Management
-=========================
-
-Issues within this bug tracking system will transition through a
-number of states according to this diagram:
-
-.. figure:: media/zepsec-workflow.png
-
-- New: This state represents new reports that have been entered
-  directly by a reporter.  When entered by the response team in
-  response to an email, the issue shall be transitioned directly to
-  Triage.
-
-- Triage: This issue is awaiting Triage by the response team.  The
-  response team will analyze the issue, determine a responsible
-  entity, assign the JIRA ticket to that individual, and move the
-  issue to the Assigned state.  Part of triage will be to set the
-  issue's priority.
-
-- Assigned: The issue has been assigned, and is awaiting a fix by the
-  assignee.
-
-- Review: Once there is a Zephyr pull request for the issue, the PR
-  link will be added to a comment in the issue, and the issue moved to
-  the Review state.
-
-- Accepted: Indicates that this issue has been merged into the
-  appropriate branch within Zephyr.
-
-- Release: The PR has been included in a released version of Zephyr.
-
-- Public: The embargo period has ended.  The issue will be made
-  publically visible, the associated CVE updated, and the
-  vulnerabilities page in the docs updated to include the detailed
-  information.
-
-The issues created in this JIRA instance are kept private, due to the
-sensitive nature of security reports.  The issues are only visible to
-certain parties:
-
-- Members of the PSIRT mailing list
-
-- the reporter
-
-- others, as proposed and ratified by the Zephyr Security
-  Subcommittee.  In the general case, this will include:
-
-  - The code owner responsible for the fix.
-
-  - The Zephyr release owners for the relevant releases affected by
-    this vulnerability.
-
-The Zephyr Security Subcommittee shall review the reported
-vulnerabilities during any meeting with more than three people in
-attendance.  During this review, they shall determine if new issues
-need to be embargoed.
-
-The guideline for embargo will be based on: 1. Severity of the issue,
-and 2. Exploitability of the issue.  Issues that the subcommittee
-decides do not need an embargo will be reproduced in the regular
-Zephyr project bug tracking system, and a comment added to the JIRA
-issue pointing to the bug tracking issue.  These issues will be marked
-as being tracked within the Zephyr bug tracking system.
-
-Security sensitive vulnerabilities shall be made public after an
-embargo period of at most 90 days.  The intent is to allow 30 days
-within the Zephyr project to fix the issues, and 60 days for external
-parties building products using Zephyr to be able to apply and
-distribute these fixes.
-
-Fixes to the code shall be made through pull requests PR in the Zephyr
-project github.  Developers shall make an attempt to not reveal the
-sensitive nature of what is being fixed, and shall not refer to CVE
-numbers that have been assigned to the issue.  The developer instead
-should merely describe what has been fixed.
-
-The security subcommittee will maintain information mapping embargoed
-CVEs to these PRs (this information is within the JIRA issues), and
-produce regular reports of the state of security issues.
-
-Each JIRA issue that is considered a security vulnerability shall be
-assigned a CVE number.  As fixes are created, it may be necessary to
-allocate additional CVE numbers, or to retire numbers that were
-assigned.
-
-Vulnerability Notification
-==========================
-
-Each Zephyr release shall contain a report of CVEs that were fixed in
-that release.  Because of the sensitive nature of these
-vulnerabilities, the release shall merely include a list of CVEs that
-have been fixed.  After the embargo period, the vulnerabilities page
-shall be updated to include additional details of these
-vulnerabilities.  The vulnerability page shall give credit to the
-reporter(s) unless a reporter specifically requests anonymity.
-
-The Zephyr project shall maintain a vulnerability-alerts mailing list.
-This list will be seeded initially with a contact from each project
-member.  Additional parties can request to join this list by filling
-out the form at the `Vulnerability Registry`_.  These parties will be
-vetted by the project director to determine that they have a
-legimitate interest in knowing about security vulnerabilities during
-the embargo period.
-
-.. _Vulnerability Registry: https://www.zephyrproject.org/vulnerability-registry/ 
-
-Periodically, the security subcommittee will send information to this
-mailing list describing known embargoed issues, and their backport
-status within the project.  This information is intended to allow them
-to determine if they need to backport these changes to any internal
-trees.
-
-When issues have been triaged, this list will be informed of:
-
-- The Zephyr Project security JIRA link (ZEPSEC).
-
-- The CVE number assigned.
-
-- The subsystem involved.
-
-- The severity of the issue.
-
-After acceptance of a PR fixing the issue (merged), in addition to the
-above, the list will be informed of:
-
-- The association between the CVE number and the PR fixing it.
-
-- Backport plans within the Zephyr project.
-
-Backporting of Security Vulnerabilities
-=======================================
-
-Each security issue fixed within zephyr shall be backported to the
-following releases:
-
-- The current Long Term Stable (LTS) release.
-
-- The most recent two releases.
-
-The developer of the fix shall be responsible for any necessary
-backports, and apply them to any of the above listed release branches,
-unless the fix does not apply (the vulnerability was introduced after
-this release was made).
-
-Backports will be tracked on the security JIRA instance using a
-subtask issue of type "backport".
-
-Need to Know
-============
-
-Due to the sensitive nature of security vulnerabilities, it is
-important to share details and fixes only with those parties that have
-a need to know.  The following parties will need to know details about
-security vulnerabilities before the embargo period ends:
-
-- Maintainers will have access to all information within their domain
-  area only.
-
-- The current release manager, and the release manager for historical
-  releases affected by the vulnerability (see backporting above).
-
-- The Project Security Incident Response (PSIRT) team will have full
-  access to information.  The PSIRT is made up of representatives from
-  platinum members, and volunteers who do work on triage from other
-  members.
-
-- As needed, release managers and maintainers may be invited to attend
-  additional security meetings to discuss vulnerabilties.
+Please see :ref:`reporting` for information on reporting security
+vulnerabilities.
 
 Threat Modeling and Mitigation
 ==============================
@@ -731,7 +549,7 @@ vulnerabilities, as well as the description of the potential exploits of
 these vulnerabilities. Additionally, the impact on the asset, the module
 it resides in, and the overall system is to be estimated. This threat
 model is then considered in the module and system security architecture
-and appropriate counter-measures are defined to mitigate the threat or
+and appropriate countermeasures are defined to mitigate the threat or
 limit the impact of exploits.
 
 In short, the threat modeling process can be separated into these steps
@@ -749,7 +567,7 @@ In short, the threat modeling process can be separated into these steps
 
 This procedure shall be carried out during the design phase of modules
 and before major changes of the module or system architecture.
-Additionally, new models shall be created or existing ones shall be
+Additionally, new models shall be created, or existing ones shall be
 updated whenever new vulnerabilities or exploits are discovered. During
 security reviews, the threat models and the mitigation techniques shall
 be evaluated by the responsible security architect.
@@ -797,7 +615,7 @@ Security Certification
 
 One goal of creating a secure branch of the Zephyr RTOS is to create a
 certifiable system or certifiable submodules thereof. The certification
-scope and scheme is yet to be decided. However, many certification such
+scope and scheme are yet to be decided. However, many certifications such
 as Common Criteria [CCITSE12]_ require evidence that the evaluation
 claims are indeed fulfilled, so a general certification process is
 outlined in the following. Based on the final choices for the
@@ -863,7 +681,7 @@ pursued:
    including a specific hardware, the Zephyr RTOS, and an
    application is certified.
 
-In all three cases, the certification scheme (e.g. FIPS 140-2 [NIST02]_
+In all three cases, the certification scheme (e.g., FIPS 140-2 [NIST02]_
 or Common Criteria [CCITSE12]_), the scope of the certification
 (main-stream Zephyr, security branch, or certain modules), and the
 certification/assurance level need to be determined.

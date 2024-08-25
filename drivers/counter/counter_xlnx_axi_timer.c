@@ -6,10 +6,12 @@
 
 #define DT_DRV_COMPAT xlnx_xps_timer_1_00_a
 
-#include <device.h>
-#include <drivers/counter.h>
-#include <sys/sys_io.h>
-#include <logging/log.h>
+#include <zephyr/arch/cpu.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/counter.h>
+#include <zephyr/irq.h>
+#include <zephyr/sys/sys_io.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(xlnx_axi_timer, CONFIG_COUNTER_LOG_LEVEL);
 
 /* AXI Timer v2.0 registers offsets (See Xilinx PG079 for details) */
@@ -256,13 +258,6 @@ static uint32_t xlnx_axi_timer_get_top_value(const struct device *dev)
 	return xlnx_axi_timer_read32(dev, TLR0_OFFSET);
 }
 
-static uint32_t xlnx_axi_timer_get_max_relative_alarm(const struct device *dev)
-{
-	const struct xlnx_axi_timer_config *config = dev->config;
-
-	return config->info.max_top_value;
-}
-
 static void xlnx_axi_timer_isr(const struct device *dev)
 {
 	struct xlnx_axi_timer_data *data = dev->data;
@@ -299,7 +294,7 @@ static int xlnx_axi_timer_init(const struct device *dev)
 	const struct xlnx_axi_timer_config *config = dev->config;
 
 	LOG_DBG("max top value = 0x%08x", config->info.max_top_value);
-	LOG_DBG("freqency = %d", config->info.freq);
+	LOG_DBG("frequency = %d", config->info.freq);
 	LOG_DBG("channels = %d", config->info.channels);
 
 	xlnx_axi_timer_write32(dev, config->info.max_top_value, TLR0_OFFSET);
@@ -323,7 +318,6 @@ static const struct counter_driver_api xlnx_axi_timer_driver_api = {
 	.set_top_value = xlnx_axi_timer_set_top_value,
 	.get_pending_int = xlnx_axi_timer_get_pending_int,
 	.get_top_value = xlnx_axi_timer_get_top_value,
-	.get_max_relative_alarm = xlnx_axi_timer_get_max_relative_alarm,
 };
 
 #define XLNX_AXI_TIMER_INIT(n)						\
@@ -345,18 +339,19 @@ static const struct counter_driver_api xlnx_axi_timer_driver_api = {
 									\
 	static struct xlnx_axi_timer_data xlnx_axi_timer_data_##n;	\
 									\
-	DEVICE_AND_API_INIT(xlnx_axi_timer_##n, DT_INST_LABEL(n),	\
-			&xlnx_axi_timer_init, &xlnx_axi_timer_data_##n,	\
+	DEVICE_DT_INST_DEFINE(n, &xlnx_axi_timer_init,			\
+			NULL,						\
+			&xlnx_axi_timer_data_##n,			\
 			&xlnx_axi_timer_config_##n,			\
 			POST_KERNEL,					\
-			CONFIG_KERNEL_INIT_PRIORITY_DEVICE,		\
+			CONFIG_COUNTER_INIT_PRIORITY,			\
 			&xlnx_axi_timer_driver_api);			\
 									\
 	static void xlnx_axi_timer_config_func_##n(const struct device *dev) \
 	{								\
 		IRQ_CONNECT(DT_INST_IRQN(n), DT_INST_IRQ(n, priority),	\
 			    xlnx_axi_timer_isr,				\
-			    DEVICE_GET(xlnx_axi_timer_##n), 0);		\
+			    DEVICE_DT_INST_GET(n), 0);			\
 		irq_enable(DT_INST_IRQN(n));				\
 	}
 

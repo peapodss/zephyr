@@ -7,30 +7,11 @@
 #ifndef ZEPHYR_SUBSYS_BLUETOOTH_MESH_APP_KEYS_H_
 #define ZEPHYR_SUBSYS_BLUETOOTH_MESH_APP_KEYS_H_
 
-#include <bluetooth/mesh.h>
+#include <zephyr/bluetooth/mesh.h>
 #include "subnet.h"
-
-/** Mesh Application. */
-struct bt_mesh_app_key {
-	uint16_t net_idx;
-	uint16_t app_idx;
-	bool updated;
-	struct bt_mesh_app_cred {
-		uint8_t id;
-		uint8_t val[16];
-	} keys[2];
-};
 
 /** @brief Reset the app keys module. */
 void bt_mesh_app_keys_reset(void);
-
-/** @brief Get the application key with the given AppIdx.
- *
- *  @param app_idx App index.
- *
- *  @return The matching application, or NULL if the application isn't known.
- */
-struct bt_mesh_app_key *bt_mesh_app_key_get(uint16_t app_idx);
 
 /** @brief Initialize a new application key with the given parameters.
  *
@@ -42,7 +23,7 @@ struct bt_mesh_app_key *bt_mesh_app_key_get(uint16_t app_idx);
  *  @return 0 on success, or (negative) error code on failure.
  */
 int bt_mesh_app_key_set(uint16_t app_idx, uint16_t net_idx,
-			const uint8_t old_key[16], const uint8_t new_key[16]);
+			const struct bt_mesh_key *old_key, const struct bt_mesh_key *new_key);
 
 /** @brief Resolve the message encryption keys, given a message context.
  *
@@ -60,7 +41,7 @@ int bt_mesh_app_key_set(uint16_t app_idx, uint16_t net_idx,
  */
 int bt_mesh_keys_resolve(struct bt_mesh_msg_ctx *ctx,
 			 struct bt_mesh_subnet **sub,
-			 const uint8_t *app_key[16], uint8_t *aid);
+			 const struct bt_mesh_key **app_key, uint8_t *aid);
 
 /** @brief Iterate through all matching application keys and call @c cb on each.
  *
@@ -75,7 +56,10 @@ int bt_mesh_keys_resolve(struct bt_mesh_msg_ctx *ctx,
 uint16_t bt_mesh_app_key_find(bool dev_key, uint8_t aid,
 			      struct bt_mesh_net_rx *rx,
 			      int (*cb)(struct bt_mesh_net_rx *rx,
-					const uint8_t key[16], void *cb_data),
+					const struct bt_mesh_key *key, void *cb_data),
 			      void *cb_data);
+
+/** @brief Store pending application keys in persistent storage. */
+void bt_mesh_app_key_pending_store(void);
 
 #endif /* ZEPHYR_SUBSYS_BLUETOOTH_MESH_APP_KEYS_H_ */

@@ -1,15 +1,18 @@
 /*
  * Copyright (c) 2018 blik GmbH
- * Copyright (c) 2018, NXP
+ * Copyright (c) 2018,2024 NXP
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #define DT_DRV_COMPAT nxp_kinetis_rtc
 
-#include <drivers/counter.h>
+#include <zephyr/drivers/counter.h>
+#include <zephyr/irq.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys_clock.h>
 #include <fsl_rtc.h>
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(mcux_rtc, CONFIG_COUNTER_LOG_LEVEL);
 
@@ -182,13 +185,6 @@ static uint32_t mcux_rtc_get_top_value(const struct device *dev)
 	return info->max_top_value;
 }
 
-static uint32_t mcux_rtc_get_max_relative_alarm(const struct device *dev)
-{
-	const struct counter_config_info *info = dev->config;
-
-	return info->max_top_value;
-}
-
 static void mcux_rtc_isr(const struct device *dev)
 {
 	const struct counter_config_info *info = dev->config;
@@ -240,9 +236,26 @@ static int mcux_rtc_init(const struct device *dev)
 	RTC_GetDefaultConfig(&rtc_config);
 	RTC_Init(config->base, &rtc_config);
 
+	/* DT_ENUM_IDX(DT_NODELABEL(rtc), clock_source):
+	 * "RTC": 0
+	 * "LPO": 1
+	 */
+	BUILD_ASSERT((((DT_INST_ENUM_IDX(0, clock_source) == 1) &&
+		FSL_FEATURE_RTC_HAS_LPO_ADJUST) ||
+		DT_INST_ENUM_IDX(0, clock_source) == 0),
+		"Cannot choose the LPO clock for that instance of the RTC");
+#if (defined(FSL_FEATURE_RTC_HAS_LPO_ADJUST) && FSL_FEATURE_RTC_HAS_LPO_ADJUST)
+	/* The RTC prescaler increments using the LPO 1 kHz clock
+	 * instead of the RTC clock
+	 */
+	RTC_EnableLPOClock(config->base, DT_INST_ENUM_IDX(0, clock_source));
+#endif
+
+#if !(defined(FSL_FEATURE_RTC_HAS_NO_CR_OSCE) && FSL_FEATURE_RTC_HAS_NO_CR_OSCE)
 	/* Enable 32kHz oscillator and wait for 1ms to settle */
-	config->base->CR |= 0x100;
+	RTC_SetClockSource(config->base);
 	k_busy_wait(USEC_PER_MSEC);
+#endif /* !FSL_FEATURE_RTC_HAS_NO_CR_OSCE */
 
 	config->irq_config_func(dev);
 
@@ -258,7 +271,6 @@ static const struct counter_driver_api mcux_rtc_driver_api = {
 	.set_top_value = mcux_rtc_set_top_value,
 	.get_pending_int = mcux_rtc_get_pending_int,
 	.get_top_value = mcux_rtc_get_top_value,
-	.get_max_relative_alarm = mcux_rtc_get_max_relative_alarm,
 };
 
 static struct mcux_rtc_data mcux_rtc_data_0;
@@ -277,15 +289,15 @@ static struct mcux_rtc_config mcux_rtc_config_0 = {
 	},
 };
 
-DEVICE_AND_API_INIT(rtc, DT_INST_LABEL(0), &mcux_rtc_init,
+DEVICE_DT_INST_DEFINE(0, &mcux_rtc_init, NULL,
 		    &mcux_rtc_data_0, &mcux_rtc_config_0.info,
-		    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
+		    POST_KERNEL, CONFIG_COUNTER_INIT_PRIORITY,
 		    &mcux_rtc_driver_api);
 
 static void mcux_rtc_irq_config_0(const struct device *dev)
 {
 	IRQ_CONNECT(DT_INST_IRQN(0),
 		    DT_INST_IRQ(0, priority),
-		    mcux_rtc_isr, DEVICE_GET(rtc), 0);
+		    mcux_rtc_isr, DEVICE_DT_INST_GET(0), 0);
 	irq_enable(DT_INST_IRQN(0));
 }

@@ -1,40 +1,32 @@
 /*
- * Copyright (c) 2019 Vestas Wind Systems A/S
+ * Copyright (c) 2019-2024 Vestas Wind Systems A/S
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr.h>
-#include <device.h>
-#include <drivers/adc.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/adc.h>
 #include <stdio.h>
+#include <math.h>
 
 #define LOG_LEVEL CONFIG_LOG_DEFAULT_LEVEL
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main);
 
+/* Nominal RTD (PT100) resistance in ohms */
 #define RTD_NOMINAL_RESISTANCE 100
 
-static double sqrt(double value)
-{
-	double sqrt = value / 3;
-	int i;
+/* ADC maximum value (taking sign bit into consideration) */
+#define ADC_MAX(resolution) BIT_MASK(resolution - 1)
 
-	if (value <= 0) {
-		return 0;
-	}
-
-	for (i = 0; i < 6; i++) {
-		sqrt = (sqrt + value / sqrt) / 2;
-	}
-
-	return sqrt;
-}
+/* Bottom resistor value in ohms */
+#define BOTTOM_RESISTANCE 2000
 
 static double rtd_temperature(int nom, double resistance)
 {
-	double a0 =  3.90802E-3;
-	double b0 = -0.58020E-6;
+	const double a0 =  3.90802E-3;
+	const double b0 = -0.58020E-6;
 	double temp;
 
 	temp = -nom * a0;
@@ -45,49 +37,41 @@ static double rtd_temperature(int nom, double resistance)
 	return temp;
 }
 
-void main(void)
+int main(void)
 {
-	const struct device *lmp90100;
+	const struct adc_dt_spec ch_cfg = ADC_DT_SPEC_GET(DT_PATH(zephyr_user));
+	double adc_max = ADC_MAX(ch_cfg.resolution);
 	double resistance;
 	int32_t buffer;
 	int err;
-	const struct adc_channel_cfg ch_cfg = {
-		.channel_id = 0,
-		.differential = 1,
-		.input_positive = 0,
-		.input_negative = 1,
-		.reference = ADC_REF_EXTERNAL1,
-		.gain = ADC_GAIN_1,
-		.acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 0)
-	};
-	const struct adc_sequence seq = {
-		.options = NULL,
-		.channels = BIT(0),
+	struct adc_sequence seq = {
 		.buffer = &buffer,
 		.buffer_size = sizeof(buffer),
-		.resolution = 24,
-		.oversampling = 0,
-		.calibrate = 0
 	};
 
-	lmp90100 = device_get_binding(DT_LABEL(DT_INST(0, ti_lmp90100)));
-	if (!lmp90100) {
-		LOG_ERR("LMP90100 device not found");
-		return;
+	if (!adc_is_ready_dt(&ch_cfg)) {
+		LOG_ERR("LMP90100 device not ready");
+		return 0;
 	}
 
-	err = adc_channel_setup(lmp90100, &ch_cfg);
-	if (err) {
+	err = adc_channel_setup_dt(&ch_cfg);
+	if (err != 0) {
 		LOG_ERR("failed to setup ADC channel (err %d)", err);
-		return;
+		return 0;
+	}
+
+	err = adc_sequence_init_dt(&ch_cfg, &seq);
+	if (err != 0) {
+		LOG_ERR("failed to initialize ADC sequence (err %d)", err);
+		return 0;
 	}
 
 	while (true) {
-		err = adc_read(lmp90100, &seq);
-		if (err) {
+		err = adc_read_dt(&ch_cfg, &seq);
+		if (err != 0) {
 			LOG_ERR("failed to read ADC (err %d)", err);
 		} else {
-			resistance = (buffer / 8388608.0) * 2000;
+			resistance = (buffer / adc_max) * BOTTOM_RESISTANCE;
 			printf("R: %.02f ohm\n", resistance);
 			printf("T: %.02f degC\n",
 				rtd_temperature(RTD_NOMINAL_RESISTANCE,
@@ -96,4 +80,5 @@ void main(void)
 
 		k_sleep(K_MSEC(1000));
 	}
+	return 0;
 }

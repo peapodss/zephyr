@@ -1,3 +1,5 @@
 tests:
-  kernel.memory_slabs.api:
-    tags: kernel
+  kernel.memory_slabs:
+    tags:
+      - kernel
+      - memory_slabs

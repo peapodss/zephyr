@@ -5,25 +5,25 @@
  */
 
 #include <errno.h>
-#include <net/dns_sd.h>
-#include <net/socket.h>
-#include <posix/netinet/in.h>
+#include <zephyr/net/dns_sd.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/posix/netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <zephyr.h>
+#include <zephyr/kernel.h>
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(mdns_echo_service, LOG_LEVEL_DBG);
 
 /* A default port of 0 causes bind(2) to request an ephemeral port */
 #define DEFAULT_PORT 0
 
-static void welcome(int fd)
+static int welcome(int fd)
 {
 	static const char msg[] = "Bonjour, Zephyr world!\n";
 
-	send(fd, msg, sizeof(msg), 0);
+	return send(fd, msg, sizeof(msg), 0);
 }
 
 /* This is mainly here to bind to a port to get service advertisement
@@ -85,6 +85,7 @@ void service(void)
 	r = bind(server_fd, &server_addr, sizeof(server_addr));
 	if (r == -1) {
 		NET_DBG("bind() failed (%d)", errno);
+		close(server_fd);
 		return;
 	}
 
@@ -98,11 +99,12 @@ void service(void)
 
 	inet_ntop(server_addr.sa_family, addrp, addrstr, sizeof(addrstr));
 	NET_DBG("bound to [%s]:%u",
-		log_strdup(addrstr), ntohs(*portp));
+		addrstr, ntohs(*portp));
 
 	r = listen(server_fd, 1);
 	if (r == -1) {
 		NET_DBG("listen() failed (%d)", errno);
+		close(server_fd);
 		return;
 	}
 
@@ -118,10 +120,15 @@ void service(void)
 
 		inet_ntop(server_addr.sa_family, addrp, addrstr, sizeof(addrstr));
 		NET_DBG("accepted connection from [%s]:%u",
-			log_strdup(addrstr), ntohs(*portp));
+			addrstr, ntohs(*portp));
 
 		/* send a banner */
-		welcome(client_fd);
+		r = welcome(client_fd);
+		if (r == -1) {
+			NET_DBG("send() failed (%d)", errno);
+			close(client_fd);
+			return;
+		}
 
 		for (;;) {
 			/* echo 1 line at a time */

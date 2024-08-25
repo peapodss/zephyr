@@ -11,13 +11,14 @@
 #include <soc.h>
 #include <string.h>
 #include <stdio.h>
-#include <kernel.h>
-#include <sys/byteorder.h>
-#include <usb/usb_device.h>
-#include <device.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/init.h>
 
 #define LOG_LEVEL CONFIG_USB_DRIVER_LOG_LEVEL
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/irq.h>
 LOG_MODULE_REGISTER(usb_dc_kinetis);
 
 #define NUM_OF_EP_MAX		DT_INST_PROP(0, num_bidir_endpoints)
@@ -80,7 +81,11 @@ static struct buf_descriptor __aligned(512) bdt[(NUM_OF_EP_MAX) * 2 * 2];
 
 #define EP_BUF_NUMOF_BLOCKS		(NUM_OF_EP_MAX / 2)
 
-K_MEM_POOL_DEFINE(ep_buf_pool, 16, 512, EP_BUF_NUMOF_BLOCKS, 4);
+K_HEAP_DEFINE(ep_buf_pool, 512 * EP_BUF_NUMOF_BLOCKS + 128);
+
+struct ep_mem_block {
+	void *data;
+};
 
 struct usb_ep_ctrl_data {
 	struct ep_status {
@@ -95,8 +100,8 @@ struct usb_ep_ctrl_data {
 	} status;
 	uint16_t mps_in;
 	uint16_t mps_out;
-	struct k_mem_block mblock_in;
-	struct k_mem_block mblock_out;
+	struct ep_mem_block mblock_in;
+	struct ep_mem_block mblock_out;
 	usb_dc_ep_callback cb_in;
 	usb_dc_ep_callback cb_out;
 };
@@ -127,7 +132,6 @@ struct cb_msg {
 
 K_MSGQ_DEFINE(usb_dc_msgq, sizeof(struct cb_msg), 10, 4);
 static void usb_kinetis_isr_handler(void);
-static void usb_kinetis_thread_main(void *arg1, void *unused1, void *unused2);
 
 /*
  * This function returns the BD element index based on
@@ -170,16 +174,7 @@ static int kinetis_usb_init(void)
 
 	USB0->USBCTRL = USB_USBCTRL_PDE_MASK;
 
-	k_thread_create(&dev_data.thread, dev_data.thread_stack,
-			USBD_THREAD_STACK_SIZE,
-			usb_kinetis_thread_main, NULL, NULL, NULL,
-			K_PRIO_COOP(2), 0, K_NO_WAIT);
 
-	/* Connect and enable USB interrupt */
-	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority),
-		    usb_kinetis_isr_handler, 0, 0);
-
-	irq_enable(DT_INST_IRQN(0));
 
 	LOG_DBG("");
 
@@ -191,7 +186,6 @@ int usb_dc_reset(void)
 	for (uint8_t i = 0; i < 16; i++) {
 		USB0->ENDPOINT[i].ENDPT = 0;
 	}
-	(void)memset(bdt, 0, sizeof(bdt));
 	dev_data.bd_active = 0U;
 	dev_data.address = 0U;
 
@@ -263,7 +257,7 @@ int usb_dc_set_address(const uint8_t addr)
 	/*
 	 * The device stack tries to set the address before
 	 * sending the ACK with ZLP, which is totally stupid,
-	 * as workaround the addresse will be buffered and
+	 * as workaround the address will be buffered and
 	 * placed later inside isr handler (see KINETIS_IN_TOKEN).
 	 */
 	dev_data.address = 0x80 | (addr & 0x7f);
@@ -325,7 +319,7 @@ int usb_dc_ep_configure(const struct usb_dc_ep_cfg_data * const cfg)
 {
 	uint8_t ep_idx = USB_EP_GET_IDX(cfg->ep_addr);
 	struct usb_ep_ctrl_data *ep_ctrl;
-	struct k_mem_block *block;
+	struct ep_mem_block *block;
 	uint8_t idx_even;
 	uint8_t idx_odd;
 
@@ -353,14 +347,15 @@ int usb_dc_ep_configure(const struct usb_dc_ep_cfg_data * const cfg)
 	}
 
 	if (bdt[idx_even].buf_addr) {
-		k_mem_pool_free(block);
+		k_heap_free(&ep_buf_pool, block->data);
 	}
 
 	USB0->ENDPOINT[ep_idx].ENDPT = 0;
 	(void)memset(&bdt[idx_even], 0, sizeof(struct buf_descriptor));
 	(void)memset(&bdt[idx_odd], 0, sizeof(struct buf_descriptor));
 
-	if (k_mem_pool_alloc(&ep_buf_pool, block, cfg->ep_mps * 2U, K_MSEC(10)) == 0) {
+	block->data = k_heap_alloc(&ep_buf_pool, cfg->ep_mps * 2U, K_NO_WAIT);
+	if (block->data != NULL) {
 		(void)memset(block->data, 0, cfg->ep_mps * 2U);
 	} else {
 		LOG_ERR("Memory allocation time-out");
@@ -853,16 +848,21 @@ int usb_dc_ep_mps(const uint8_t ep)
 	}
 }
 
-static inline void reenable_all_endpoints(void)
+static inline void reenable_control_endpoints(void)
 {
-	for (uint8_t ep_idx = 0; ep_idx < NUM_OF_EP_MAX; ep_idx++) {
-		if (dev_data.ep_ctrl[ep_idx].status.out_enabled) {
-			usb_dc_ep_enable(ep_idx);
-		}
-		if (dev_data.ep_ctrl[ep_idx].status.in_enabled) {
-			usb_dc_ep_enable(ep_idx | USB_EP_DIR_IN);
-		}
-	}
+	struct usb_dc_ep_cfg_data ep_cfg;
+
+	/* Reconfigure control endpoint 0 after a reset */
+	ep_cfg.ep_addr = USB_CONTROL_EP_OUT;
+	ep_cfg.ep_mps = USB_CONTROL_EP_MPS;
+	ep_cfg.ep_type = USB_DC_EP_CONTROL;
+	usb_dc_ep_configure(&ep_cfg);
+	ep_cfg.ep_addr = USB_CONTROL_EP_IN;
+	usb_dc_ep_configure(&ep_cfg);
+
+	/* Enable both endpoint directions */
+	usb_dc_ep_enable(USB_CONTROL_EP_OUT);
+	usb_dc_ep_enable(USB_CONTROL_EP_IN);
 }
 
 static void usb_kinetis_isr_handler(void)
@@ -878,12 +878,12 @@ static void usb_kinetis_isr_handler(void)
 		/*
 		 * Device reset is not possible because the stack does not
 		 * configure the endpoints after the USB_DC_RESET event,
-		 * therefore, reenable all endpoints and set they BDT into a
-		 * defined state.
+		 * therefore, we must re-enable the default control 0 endpoint
+		 * after a reset event
 		 */
 		USB0->CTL |= USB_CTL_ODDRST_MASK;
 		USB0->CTL &= ~USB_CTL_ODDRST_MASK;
-		reenable_all_endpoints();
+		reenable_control_endpoints();
 		msg.ep = 0U;
 		msg.type = USB_DC_CB_TYPE_MGMT;
 		msg.cb = USB_DC_RESET;
@@ -1041,3 +1041,22 @@ static void usb_kinetis_thread_main(void *arg1, void *unused1, void *unused2)
 		}
 	}
 }
+
+static int usb_kinetis_init(void)
+{
+
+	(void)memset(bdt, 0, sizeof(bdt));
+	k_thread_create(&dev_data.thread, dev_data.thread_stack,
+			USBD_THREAD_STACK_SIZE,
+			usb_kinetis_thread_main, NULL, NULL, NULL,
+			K_PRIO_COOP(2), 0, K_NO_WAIT);
+	k_thread_name_set(&dev_data.thread, "usb_kinetis");
+
+	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority),
+		    usb_kinetis_isr_handler, 0, 0);
+	irq_enable(DT_INST_IRQN(0));
+
+	return 0;
+}
+
+SYS_INIT(usb_kinetis_init, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);

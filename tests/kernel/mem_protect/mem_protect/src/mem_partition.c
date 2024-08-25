@@ -4,42 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <sys/mempool.h>
+#include <zephyr/kernel.h>
 #include "mem_protect.h"
 
-static K_APP_DMEM(ztest_mem_partition) int var = 1356;
-static K_APP_BMEM(ztest_mem_partition) int zeroed_var = 20420;
-static K_APP_BMEM(ztest_mem_partition) int bss_var;
-
-SYS_MEM_POOL_DEFINE(data_pool, NULL, BLK_SIZE_MIN_MD, BLK_SIZE_MAX_MD,
-		    BLK_NUM_MAX_MD, BLK_ALIGN_MD,
-		    K_APP_DMEM_SECTION(ztest_mem_partition));
-
-/**
- * @brief Test system provide means to obtain names of the data and BSS sections
- *
- * @details
- * - Define memory partition and define system memory pool using macros
- *   SYS_MEM_POOL_DEFINE
- * - Section name of the destination binary section for pool data will be
- *   obtained at build time by macros K_APP_DMEM_SECTION() which obtaines
- *   a section name.
- * - Then to check that system memory pool initialized correctly by allocating
- *   a block from it and check that it is not NULL.
- *
- * @ingroup kernel_memprotect_tests
- *
- * @see K_APP_DMEM_SECTION()
+/* Add volatile to disable pre-calculation in compile stage in some
+ * toolchain, such as arcmwdt toolchain.
  */
-void test_macros_obtain_names_data_bss(void)
-{
-	sys_mem_pool_init(&data_pool);
-	void *block;
-
-	block = sys_mem_pool_alloc(&data_pool, BLK_SIZE_MAX_MD - DESC_SIZE);
-	zassert_not_null(block, NULL);
-}
+static volatile K_APP_DMEM(ztest_mem_partition) int var = 1356;
+static volatile K_APP_BMEM(ztest_mem_partition) int zeroed_var = 20420;
+static volatile K_APP_BMEM(ztest_mem_partition) int bss_var;
 
 /**
  * @brief Test assigning global data and BSS variables to memory partitions
@@ -49,24 +22,24 @@ void test_macros_obtain_names_data_bss(void)
  *
  * @ingroup kernel_memprotect_tests
  */
-void test_mem_part_assign_bss_vars_zero(void)
+ZTEST_USER(mem_protect_part, test_mem_part_assign_bss_vars_zero)
 {
 	/* The global variable var will be inside the bounds of
 	 * ztest_mem_partition and be initialized with 1356 at boot.
 	 */
-	zassert_true(var == 1356, NULL);
+	zassert_true(var == 1356);
 
 	/* The global variable zeroed_var will be inside the bounds of
 	 * ztest_mem_partition and must be zeroed at boot size K_APP_BMEM() was
 	 * used, indicating a BSS variable.
 	 */
-	zassert_true(zeroed_var == 0, NULL);
+	zassert_true(zeroed_var == 0);
 
 	/* The global variable var will be inside the bounds of
 	 * ztest_mem_partition and must be zeroed at boot size K_APP_BMEM() was
 	 * used, indicating a BSS variable.
 	 */
-	zassert_true(bss_var == 0, NULL);
+	zassert_true(bss_var == 0);
 }
 
 K_APPMEM_PARTITION_DEFINE(part_arch);
@@ -84,9 +57,11 @@ K_APP_BMEM(part_arch) uint8_t __aligned(MEM_REGION_ALLOC)
  *
  * @ingroup kernel_memprotect_tests
  */
-void test_mem_part_auto_determ_size(void)
+ZTEST(mem_protect_part, test_mem_part_auto_determ_size)
 {
-	zassert_true(part_arch.size == MEM_REGION_ALLOC, NULL);
+	zassert_true(part_arch.size == MEM_REGION_ALLOC);
 	zassert_true(part_arch.start == (uintptr_t)buf_arc,
 	   "Base address of memory partition not determined at build time");
 }
+
+ZTEST_SUITE(mem_protect_part, NULL, NULL, NULL, NULL, NULL);

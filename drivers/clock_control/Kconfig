@@ -7,7 +7,7 @@
 # Clock controller drivers
 #
 menuconfig CLOCK_CONTROL
-	bool "Hardware clock controller support"
+	bool "Clock controller drivers"
 	help
 	  Enable support for hardware clock controller. Such hardware can
 	  provide clock for other subsystem, and thus can be also used for
@@ -15,6 +15,12 @@ menuconfig CLOCK_CONTROL
 	  nothing to do with RTC.
 
 if CLOCK_CONTROL
+
+config CLOCK_CONTROL_INIT_PRIORITY
+	int "Clock control init priority"
+	default KERNEL_INIT_PRIORITY_OBJECTS
+	help
+	  Clock control driver device initialization priority.
 
 module = CLOCK_CONTROL
 module-str = clock control
@@ -26,9 +32,13 @@ source "drivers/clock_control/Kconfig.stm32"
 
 source "drivers/clock_control/Kconfig.beetle"
 
+source "drivers/clock_control/Kconfig.fixed"
+
 source "drivers/clock_control/Kconfig.lpc11u6x"
 
 source "drivers/clock_control/Kconfig.mcux_ccm"
+
+source "drivers/clock_control/Kconfig.mcux_ccm_rev2"
 
 source "drivers/clock_control/Kconfig.mcux_mcg"
 
@@ -47,5 +57,43 @@ source "drivers/clock_control/Kconfig.rv32m1"
 source "drivers/clock_control/Kconfig.esp32"
 
 source "drivers/clock_control/Kconfig.litex"
+
+source "drivers/clock_control/Kconfig.rcar"
+
+source "drivers/clock_control/Kconfig.xec"
+
+source "drivers/clock_control/Kconfig.ifx_cat1"
+
+source "drivers/clock_control/Kconfig.cavs"
+
+source "drivers/clock_control/Kconfig.aspeed"
+
+source "drivers/clock_control/Kconfig.gd32"
+
+source "drivers/clock_control/Kconfig.sam"
+
+source "drivers/clock_control/Kconfig.smartbond"
+
+source "drivers/clock_control/Kconfig.numaker"
+
+source "drivers/clock_control/Kconfig.nxp_s32"
+
+source "drivers/clock_control/Kconfig.agilex5"
+
+source "drivers/clock_control/Kconfig.renesas_ra"
+
+source "drivers/clock_control/Kconfig.renesas_ra_cgc"
+
+source "drivers/clock_control/Kconfig.max32"
+
+source "drivers/clock_control/Kconfig.ambiq"
+
+source "drivers/clock_control/Kconfig.pwm"
+
+source "drivers/clock_control/Kconfig.rpi_pico"
+
+source "drivers/clock_control/Kconfig.nrf_auxpll"
+
+source "drivers/clock_control/Kconfig.arm_scmi"
 
 endif # CLOCK_CONTROL

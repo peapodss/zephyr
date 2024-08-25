@@ -4,30 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <sys/device_mmio.h>
-#include <sys/util.h>
-#include <drivers/pcie/pcie.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/device_mmio.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/drivers/pcie/pcie.h>
 #include <soc.h>
 
 
-#ifdef UART_NS16550_ACCESS_IOPORT
+#if DT_PROP_OR(DT_CHOSEN(zephyr_console), io_mapped, 0) != 0
+#define UART_IS_IOPORT_ACCESS 1
+#endif
+
+#if defined(UART_IS_IOPORT_ACCESS)
 /* Legacy I/O Port Access to a NS16550 UART */
-#define IN(reg)       sys_in8(reg + UART_NS16550_ACCESS_IOPORT)
-#define OUT(reg, val) sys_out8(val, reg + UART_NS16550_ACCESS_IOPORT)
+#define IN(reg)       sys_in8(reg + DT_REG_ADDR(DT_CHOSEN(zephyr_console)))
+#define OUT(reg, val) sys_out8(val, reg + DT_REG_ADDR(DT_CHOSEN(zephyr_console)))
 #elif defined(X86_SOC_EARLY_SERIAL_PCIDEV)
 /* "Modern" mapping of a UART into a PCI MMIO device.  The registers
  * are still bytes, but spaced at a 32 bit stride instead of packed
  * together.
  */
 static mm_reg_t mmio;
-#define IN(reg)       (sys_read32(mmio + reg * 4) & 0xff)
-#define OUT(reg, val) sys_write32((val) & 0xff, mmio + reg * 4)
+#define IN(reg)       (sys_read32(mmio + (reg) * 4) & 0xff)
+#define OUT(reg, val) sys_write32((val) & 0xff, mmio + (reg) * 4)
 #elif defined(X86_SOC_EARLY_SERIAL_MMIO8_ADDR)
 /* Still other devices use a MMIO region containing packed byte
  * registers
  */
-#if DEVICE_MMIO_IS_IN_RAM
+#ifdef DEVICE_MMIO_IS_IN_RAM
 static mm_reg_t mmio;
 #define BASE mmio
 #else
@@ -60,6 +64,9 @@ static mm_reg_t mmio;
 #define FCR_XMITCLR BIT(2)  /* clear XMIT FIFO           */
 #define FCR_FIFO_1  0       /* 1 byte in RCVR FIFO       */
 
+static bool early_serial_init_done;
+static uint32_t suppressed_chars;
+
 static void serout(int c)
 {
 	while ((IN(REG_LSR) & LSR_THRE) == 0) {
@@ -69,6 +76,11 @@ static void serout(int c)
 
 int arch_printk_char_out(int c)
 {
+	if (!early_serial_init_done) {
+		suppressed_chars++;
+		return c;
+	}
+
 	if (c == '\n') {
 		serout('\r');
 	}
@@ -78,9 +90,9 @@ int arch_printk_char_out(int c)
 
 void z_x86_early_serial_init(void)
 {
-#if defined(DEVICE_MMIO_IS_IN_RAM) && !defined(UART_NS16550_ACCESS_IOPORT)
+#if defined(DEVICE_MMIO_IS_IN_RAM) && !defined(UART_IS_IOPORT_ACCESS)
 #ifdef X86_SOC_EARLY_SERIAL_PCIDEV
-	struct pcie_mbar mbar;
+	struct pcie_bar mbar;
 	pcie_get_mbar(X86_SOC_EARLY_SERIAL_PCIDEV, 0, &mbar);
 	pcie_set_cmd(X86_SOC_EARLY_SERIAL_PCIDEV, PCIE_CONF_CMDSTAT_MEM, true);
 	device_map(&mmio, mbar.phys_addr, mbar.size, K_MEM_CACHE_NONE);
@@ -99,4 +111,11 @@ void z_x86_early_serial_init(void)
 
 	/* Turn on FIFO. Some hardware needs this before transmitting */
 	OUT(REG_FCR, FCR_FIFO | FCR_FIFO_1 | FCR_RCVRCLR | FCR_XMITCLR);
+
+	early_serial_init_done = true;
+
+	if (suppressed_chars != 0U) {
+		printk("WARNING: %u chars lost before early serial init\n",
+		       suppressed_chars);
+	}
 }

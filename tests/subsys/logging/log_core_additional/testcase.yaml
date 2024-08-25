@@ -1,7 +1,16 @@
 tests:
-  logging.add.async:
-    platform_exclude: qemu_riscv64
+  logging.async:
     tags: logging
-  logging.add.sync:
+    extra_args: CONF_FILE=prj.conf
+    integration_platforms:
+      - native_sim
+  logging.sync:
     tags: logging
     extra_args: CONF_FILE=log_sync.conf
+    integration_platforms:
+      - native_sim
+  logging.thread:
+    tags: logging
+    extra_args: CONF_FILE=log_thread.conf
+    integration_platforms:
+      - native_sim

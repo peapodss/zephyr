@@ -5,29 +5,30 @@ Samples and Demos
 
 
 .. toctree::
+   :titlesonly:
    :maxdepth: 2
    :glob:
 
+   sample_definition_and_criteria
    classic
    basic/*
    userspace/*
+   sysbuild/*
    subsys/subsys.rst
    net/net.rst
    bluetooth/bluetooth.rst
    sensor/*
+   arch/*
    boards/*
-   mpu/*
    drivers/drivers.rst
    application_development/*
-   display/*
    shields/*
-   portability/*
+   cpp/*
    posix/*
-   video/*
-   scheduler/*
-   smp/*
+   kernel/*
    tfm_integration/tfm_integration.rst
-   debug/*
+   modules/*
+   fuel_gauge/*
 
 .. comment
    To add a new sample document, please use the template available under

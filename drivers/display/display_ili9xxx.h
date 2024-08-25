@@ -2,25 +2,31 @@
  * Copyright (c) 2017 Jan Van Winkel <jan.van_winkel@dxplore.eu>
  * Copyright (c) 2019 Nordic Semiconductor ASA
  * Copyright (c) 2020 Teslabs Engineering S.L.
+ * Copyright (c) 2021 Krivorot Oleg <krivorot.oleg@gmail.com>
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef ZEPHYR_DRIVERS_DISPLAY_DISPLAY_ILI9XXX_H_
 #define ZEPHYR_DRIVERS_DISPLAY_DISPLAY_ILI9XXX_H_
 
-#include <drivers/gpio.h>
-#include <sys/util.h>
+#include <zephyr/drivers/mipi_dbi.h>
+#include <zephyr/sys/util.h>
 
 /* Commands/registers. */
+#define ILI9XXX_SWRESET 0x01
 #define ILI9XXX_SLPOUT 0x11
+#define ILI9XXX_DINVON 0x21
 #define ILI9XXX_GAMSET 0x26
 #define ILI9XXX_DISPOFF 0x28
 #define ILI9XXX_DISPON 0x29
 #define ILI9XXX_CASET 0x2a
 #define ILI9XXX_PASET 0x2b
 #define ILI9XXX_RAMWR 0x2c
+#define ILI9XXX_RGBSET 0x2d
+#define ILI9XXX_RAMRD 0x2e
 #define ILI9XXX_MADCTL 0x36
 #define ILI9XXX_PIXSET 0x3A
+#define ILI9XXX_RAMRD_CONT 0x3e
 
 /* MADCTL register fields. */
 #define ILI9XXX_MADCTL_MY BIT(7U)
@@ -50,23 +56,24 @@
 /** Reset wait time (ms), ref 15.4 of ILI9XXX manual. */
 #define ILI9XXX_RESET_WAIT_TIME 5
 
+enum madctl_cmd_set {
+	CMD_SET_1,	/* Default for most of ILI9xxx display controllers */
+	CMD_SET_2,	/* Used by ILI9342c */
+};
+
+struct ili9xxx_quirks {
+	enum madctl_cmd_set cmd_set;
+};
+
 struct ili9xxx_config {
-	const char *spi_name;
-	uint16_t spi_addr;
-	uint32_t spi_max_freq;
-	const char *spi_cs_label;
-	gpio_pin_t spi_cs_pin;
-	gpio_dt_flags_t spi_cs_flags;
-	const char *cmd_data_label;
-	gpio_pin_t cmd_data_pin;
-	gpio_dt_flags_t cmd_data_flags;
-	const char *reset_label;
-	gpio_pin_t reset_pin;
-	gpio_dt_flags_t reset_flags;
+	const struct ili9xxx_quirks *quirks;
+	const struct device *mipi_dev;
+	struct mipi_dbi_config dbi_config;
 	uint8_t pixel_format;
 	uint16_t rotation;
 	uint16_t x_resolution;
 	uint16_t y_resolution;
+	bool inversion;
 	const void *regs;
 	int (*regs_init_fn)(const struct device *dev);
 };

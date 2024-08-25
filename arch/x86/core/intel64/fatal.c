@@ -3,14 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 #include <ksched.h>
-#include <kernel_structs.h>
+#include <zephyr/kernel_structs.h>
 #include <kernel_internal.h>
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
 
-void z_x86_exception(z_arch_esf_t *esf)
+/* NMI handlers should override weak implementation
+ * return true if NMI is handled, false otherwise
+ */
+__weak bool z_x86_do_kernel_nmi(const struct arch_esf *esf)
+{
+	ARG_UNUSED(esf);
+
+	return false;
+}
+
+void z_x86_exception(struct arch_esf *esf)
 {
 	switch (esf->vector) {
 	case Z_X86_OOPS_VECTOR:
@@ -18,6 +28,12 @@ void z_x86_exception(z_arch_esf_t *esf)
 		break;
 	case IV_PAGE_FAULT:
 		z_x86_page_fault_handler(esf);
+		break;
+	case IV_NON_MASKABLE_INTERRUPT:
+		if (!z_x86_do_kernel_nmi(esf)) {
+			z_x86_unhandled_cpu_exception(esf->vector, esf);
+			CODE_UNREACHABLE;
+		}
 		break;
 	default:
 		z_x86_unhandled_cpu_exception(esf->vector, esf);

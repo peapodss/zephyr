@@ -1,17 +1,12 @@
-/*  Bluetooth Mesh */
-
 /*
  * Copyright (c) 2017 Intel Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#define BT_MESH_KEY_PRIMARY 0x0000
+#include <zephyr/sys/iterable_sections.h>
 
-#define BT_MESH_ADDR_IS_UNICAST(addr) ((addr) && (addr) < 0x8000)
-#define BT_MESH_ADDR_IS_GROUP(addr) ((addr) >= 0xc000 && (addr) <= 0xff00)
-#define BT_MESH_ADDR_IS_VIRTUAL(addr) ((addr) >= 0x8000 && (addr) < 0xc000)
-#define BT_MESH_ADDR_IS_RFU(addr) ((addr) >= 0xff00 && (addr) <= 0xfffb)
+#define BT_MESH_KEY_PRIMARY 0x0000
 
 enum bt_mesh_key_evt {
 	BT_MESH_KEY_ADDED,   /* New key added */
@@ -27,15 +22,14 @@ struct bt_mesh_app_key_cb {
 			    enum bt_mesh_key_evt evt);
 };
 
-/** @def BT_MESH_APP_KEY_CB
- *
+/**
  *  @brief Register an AppKey event callback.
  *
  *  @param _handler Handler function, see @ref bt_mesh_app_key_cb::evt_handler.
  */
 #define BT_MESH_APP_KEY_CB_DEFINE(_handler)                                    \
-	static const Z_STRUCT_SECTION_ITERABLE(bt_mesh_app_key_cb,             \
-					       _CONCAT(bt_mesh_app_key_cb_,    \
+	static const STRUCT_SECTION_ITERABLE(bt_mesh_app_key_cb,               \
+					     _CONCAT(bt_mesh_app_key_cb_,      \
 						       _handler)) = {          \
 		.evt_handler = (_handler),                                     \
 	}
@@ -43,3 +37,7 @@ struct bt_mesh_app_key_cb {
 struct bt_mesh_net;
 
 int bt_mesh_start(void);
+void bt_mesh_reprovision(uint16_t addr);
+void bt_mesh_dev_key_cand(const uint8_t *key);
+void bt_mesh_dev_key_cand_remove(void);
+void bt_mesh_dev_key_cand_activate(void);

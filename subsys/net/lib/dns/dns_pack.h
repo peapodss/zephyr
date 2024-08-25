@@ -7,8 +7,8 @@
 #ifndef _DNS_PACK_H_
 #define _DNS_PACK_H_
 
-#include <net/net_ip.h>
-#include <net/buf.h>
+#include <zephyr/net/net_ip.h>
+#include <zephyr/net/buf.h>
 
 #include <zephyr/types.h>
 #include <stddef.h>
@@ -93,6 +93,7 @@ enum dns_rr_type {
 	DNS_RR_TYPE_TXT = 16,		/* TXT   */
 	DNS_RR_TYPE_AAAA = 28,		/* IPv6  */
 	DNS_RR_TYPE_SRV = 33,		/* SRV   */
+	DNS_RR_TYPE_ANY = 0xff,		/* ANY (all records)   */
 };
 
 enum dns_response_type {
@@ -340,10 +341,12 @@ int dns_msg_pack_qname(uint16_t *len, uint8_t *buf, uint16_t size,
  * @param dname_ptr An index to the previous CNAME. For example for the
  *        first answer, ptr must be 0x0c, the DNAME at the question.
  * @param ttl TTL answer parameter.
+ * @param type Answer type parameter.
  * @retval 0 on success
  * @retval -ENOMEM on error
  */
-int dns_unpack_answer(struct dns_msg_t *dns_msg, int dname_ptr, uint32_t *ttl);
+int dns_unpack_answer(struct dns_msg_t *dns_msg, int dname_ptr, uint32_t *ttl,
+		      enum dns_rr_type *type);
 
 /**
  * @brief Unpacks the header's response.
@@ -459,5 +462,14 @@ static inline int llmnr_unpack_query_header(struct dns_msg_t *msg,
 int dns_unpack_query(struct dns_msg_t *dns_msg, struct net_buf *buf,
 		     enum dns_rr_type *qtype,
 		     enum dns_class *qclass);
+
+/**
+ * @brief Map query type number to a string.
+ *
+ * @param qtype Query type
+ *
+ * @return Printable query type name.
+ */
+const char *dns_qtype_to_str(enum dns_rr_type qtype);
 
 #endif

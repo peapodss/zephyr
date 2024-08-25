@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <sys_clock.h>
-#include <timing/timing.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys_clock.h>
+#include <zephyr/timing/timing.h>
 
 void arch_timing_init(void)
 {
@@ -49,5 +49,5 @@ uint64_t arch_timing_cycles_to_ns_avg(uint64_t cycles, uint32_t count)
 
 uint32_t arch_timing_freq_get_mhz(void)
 {
-	return (uint32_t)(arch_timing_freq_get() / 1000000);
+	return (uint32_t)(arch_timing_freq_get() / 1000000U);
 }

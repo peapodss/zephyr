@@ -6,9 +6,14 @@
 #
 # Boards which don't meet this convention can set this variable before
 # including this script.
-if (NOT DEFINED OPENOCD_NRF5_SUBFAMILY)
+if(NOT DEFINED OPENOCD_NRF5_SUBFAMILY)
   string(REGEX MATCH nrf5. OPENOCD_NRF5_SUBFAMILY "${BOARD}")
+
+  if(HWMv2 AND "${OPENOCD_NRF5_SUBFAMILY}" STREQUAL "")
+    string(REGEX MATCH nrf5. OPENOCD_NRF5_SUBFAMILY "${BOARD_QUALIFIERS}")
+  endif()
 endif()
+
 if("${OPENOCD_NRF5_SUBFAMILY}" STREQUAL "")
   message(FATAL_ERROR
     "Can't match nrf5 subfamily from BOARD name. "
@@ -27,7 +32,6 @@ set(pre_init_cmds
   "source [find interface/${OPENOCD_NRF5_INTERFACE}.cfg]"
   "transport select swd"
   "source [find target/${OPENOCD_NRF5_SUBFAMILY}.cfg]"
-  "$_TARGETNAME configure -rtos auto"
 )
 
 foreach(cmd ${pre_init_cmds})

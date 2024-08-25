@@ -11,7 +11,7 @@
 #include "dma_stm32.h"
 
 #define LOG_LEVEL CONFIG_DMA_LOG_LEVEL
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(dma_stm32_v1);
 
 /* DMA burst length */
@@ -35,6 +35,7 @@ uint32_t dma_stm32_id_to_stream(uint32_t id)
 	return stream_nr[id];
 }
 
+#if !defined(CONFIG_DMAMUX_STM32)
 uint32_t dma_stm32_slot_to_channel(uint32_t slot)
 {
 	static const uint32_t channel_nr[] = {
@@ -52,6 +53,7 @@ uint32_t dma_stm32_slot_to_channel(uint32_t slot)
 
 	return channel_nr[slot];
 }
+#endif
 
 void dma_stm32_clear_ht(DMA_TypeDef *DMAx, uint32_t id)
 {
@@ -243,33 +245,33 @@ void stm32_dma_dump_stream_irq(DMA_TypeDef *dma, uint32_t id)
 		dma_stm32_is_fe_active(dma, id));
 }
 
-static inline bool stm32_dma_is_tc_irq_active(DMA_TypeDef *dma, uint32_t id)
+inline bool stm32_dma_is_tc_irq_active(DMA_TypeDef *dma, uint32_t id)
 {
-	return LL_DMA_IsEnabledIT_TC(dma, id) &&
+	return LL_DMA_IsEnabledIT_TC(dma, dma_stm32_id_to_stream(id)) &&
 	       dma_stm32_is_tc_active(dma, id);
 }
 
-static inline bool stm32_dma_is_ht_irq_active(DMA_TypeDef *dma, uint32_t id)
+inline bool stm32_dma_is_ht_irq_active(DMA_TypeDef *dma, uint32_t id)
 {
-	return LL_DMA_IsEnabledIT_HT(dma, id) &&
+	return LL_DMA_IsEnabledIT_HT(dma, dma_stm32_id_to_stream(id)) &&
 	       dma_stm32_is_ht_active(dma, id);
 }
 
 static inline bool stm32_dma_is_te_irq_active(DMA_TypeDef *dma, uint32_t id)
 {
-	return LL_DMA_IsEnabledIT_TE(dma, id) &&
+	return LL_DMA_IsEnabledIT_TE(dma, dma_stm32_id_to_stream(id)) &&
 	       dma_stm32_is_te_active(dma, id);
 }
 
 static inline bool stm32_dma_is_dme_irq_active(DMA_TypeDef *dma, uint32_t id)
 {
-	return LL_DMA_IsEnabledIT_DME(dma, id) &&
+	return LL_DMA_IsEnabledIT_DME(dma, dma_stm32_id_to_stream(id)) &&
 	       dma_stm32_is_dme_active(dma, id);
 }
 
 static inline bool stm32_dma_is_fe_irq_active(DMA_TypeDef *dma, uint32_t id)
 {
-	return LL_DMA_IsEnabledIT_FE(dma, id) &&
+	return LL_DMA_IsEnabledIT_FE(dma, dma_stm32_id_to_stream(id)) &&
 	       dma_stm32_is_fe_active(dma, id);
 }
 
@@ -291,7 +293,8 @@ void stm32_dma_clear_stream_irq(DMA_TypeDef *dma, uint32_t id)
 
 bool stm32_dma_is_irq_happened(DMA_TypeDef *dma, uint32_t id)
 {
-	if (dma_stm32_is_fe_active(dma, id) && LL_DMA_IsEnabledIT_FE(dma, id)) {
+	if (LL_DMA_IsEnabledIT_FE(dma, dma_stm32_id_to_stream(id)) &&
+	    dma_stm32_is_fe_active(dma, id)) {
 		return true;
 	}
 
@@ -300,7 +303,8 @@ bool stm32_dma_is_irq_happened(DMA_TypeDef *dma, uint32_t id)
 
 bool stm32_dma_is_unexpected_irq_happened(DMA_TypeDef *dma, uint32_t id)
 {
-	if (dma_stm32_is_fe_active(dma, id) && LL_DMA_IsEnabledIT_FE(dma, id)) {
+	if (LL_DMA_IsEnabledIT_FE(dma, dma_stm32_id_to_stream(id)) &&
+	    dma_stm32_is_fe_active(dma, id)) {
 		LOG_ERR("FiFo error.");
 		stm32_dma_dump_stream_irq(dma, id);
 		stm32_dma_clear_stream_irq(dma, id);
@@ -316,15 +320,24 @@ void stm32_dma_enable_stream(DMA_TypeDef *dma, uint32_t id)
 	LL_DMA_EnableStream(dma, dma_stm32_id_to_stream(id));
 }
 
+bool stm32_dma_is_enabled_stream(DMA_TypeDef *dma, uint32_t id)
+{
+	if (LL_DMA_IsEnabledStream(dma, dma_stm32_id_to_stream(id)) == 1) {
+		return true;
+	}
+	return false;
+}
+
 int stm32_dma_disable_stream(DMA_TypeDef *dma, uint32_t id)
 {
 	LL_DMA_DisableStream(dma, dma_stm32_id_to_stream(id));
 
-	if (!LL_DMA_IsEnabledStream(dma, dma_stm32_id_to_stream(id))) {
-		return 0;
+	while (stm32_dma_is_enabled_stream(dma, id)) {
 	}
 
-	return -EAGAIN;
+	dma_stm32_clear_tc(dma, id);
+
+	return 0;
 }
 
 void stm32_dma_disable_fifo_irq(DMA_TypeDef *dma, uint32_t id)
@@ -332,11 +345,14 @@ void stm32_dma_disable_fifo_irq(DMA_TypeDef *dma, uint32_t id)
 	LL_DMA_DisableIT_FE(dma, dma_stm32_id_to_stream(id));
 }
 
-void stm32_dma_config_channel_function(DMA_TypeDef *dma, uint32_t id, uint32_t slot)
+#if !defined(CONFIG_DMAMUX_STM32)
+void stm32_dma_config_channel_function(DMA_TypeDef *dma, uint32_t id,
+					uint32_t slot)
 {
 	LL_DMA_SetChannelSelection(dma, dma_stm32_id_to_stream(id),
 			dma_stm32_slot_to_channel(slot));
 }
+#endif
 
 uint32_t stm32_dma_get_mburst(struct dma_config *config, bool source_periph)
 {
@@ -392,10 +408,9 @@ uint32_t stm32_dma_get_pburst(struct dma_config *config, bool source_periph)
 
 /*
  * This function checks if the msize, mburst and fifo level is
- * compitable. If they are not compitable, refer to the 'FIFO'
+ * compatible. If they are not compatible, refer to the 'FIFO'
  * section in the 'DMA' chapter in the Reference Manual for more
  * information.
- * break is emitted since every path of the code has 'return'.
  * This function does not have the obligation of checking the parameters.
  */
 bool stm32_dma_check_fifo_mburst(LL_DMA_InitTypeDef *DMAx)
@@ -413,44 +428,39 @@ bool stm32_dma_check_fifo_mburst(LL_DMA_InitTypeDef *DMAx)
 			if (fifo_level == LL_DMA_FIFOTHRESHOLD_1_2 ||
 			    fifo_level == LL_DMA_FIFOTHRESHOLD_FULL) {
 				return true;
-			} else {
-				return false;
 			}
+			break;
 		case LL_DMA_MBURST_INC16:
 			if (fifo_level == LL_DMA_FIFOTHRESHOLD_FULL) {
 				return true;
-			} else {
-				return false;
 			}
+			break;
 		}
+		break;
 	case LL_DMA_MDATAALIGN_HALFWORD:
 		switch (mburst) {
 		case LL_DMA_MBURST_INC4:
 			if (fifo_level == LL_DMA_FIFOTHRESHOLD_1_2 ||
 			    fifo_level == LL_DMA_FIFOTHRESHOLD_FULL) {
 				return true;
-			} else {
-				return false;
 			}
+			break;
 		case LL_DMA_MBURST_INC8:
 			if (fifo_level == LL_DMA_FIFOTHRESHOLD_FULL) {
 				return true;
-			} else {
-				return false;
 			}
-		case LL_DMA_MBURST_INC16:
-			return false;
+			break;
 		}
+		break;
 	case LL_DMA_MDATAALIGN_WORD:
 		if (mburst == LL_DMA_MBURST_INC4 &&
 		    fifo_level == LL_DMA_FIFOTHRESHOLD_FULL) {
 			return true;
-		} else {
-			return false;
 		}
-	default:
-		return false;
 	}
+
+	/* Other combinations are forbidden. */
+	return false;
 }
 
 uint32_t stm32_dma_get_fifo_threshold(uint16_t fifo_mode_control)

@@ -7,24 +7,25 @@
 #ifndef QUECTEL_BG9X_H
 #define QUECTEL_BG9X_H
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 #include <ctype.h>
 #include <errno.h>
-#include <zephyr.h>
-#include <drivers/gpio.h>
-#include <device.h>
-#include <init.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/device.h>
+#include <zephyr/init.h>
 
-#include <net/net_if.h>
-#include <net/net_offload.h>
-#include <net/socket_offload.h>
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/offloaded_netdev.h>
+#include <zephyr/net/net_offload.h>
+#include <zephyr/net/socket_offload.h>
 
 #include "modem_context.h"
 #include "modem_socket.h"
 #include "modem_cmd_handler.h"
 #include "modem_iface_uart.h"
 
-#define MDM_UART_DEV_NAME		  DT_INST_BUS_LABEL(0)
+#define MDM_UART_NODE			  DT_INST_BUS(0)
+#define MDM_UART_DEV			  DEVICE_DT_GET(MDM_UART_NODE)
 #define MDM_CMD_TIMEOUT			  K_SECONDS(10)
 #define MDM_CMD_CONN_TIMEOUT		  K_SECONDS(120)
 #define MDM_REGISTRATION_TIMEOUT	  K_SECONDS(180)
@@ -36,10 +37,11 @@
 #define MDM_BASE_SOCKET_NUM		  0
 #define MDM_NETWORK_RETRY_COUNT		  10
 #define MDM_INIT_RETRY_COUNT		  10
+#define MDM_PDP_ACT_RETRY_COUNT		  3
 #define MDM_WAIT_FOR_RSSI_COUNT		  10
 #define MDM_WAIT_FOR_RSSI_DELAY		  K_SECONDS(2)
 #define BUF_ALLOC_TIMEOUT		  K_SECONDS(1)
-#define MDM_MAX_AT_RETRIES		  50
+#define MDM_MAX_BOOT_TIME		  K_SECONDS(50)
 
 /* Default lengths of certain things. */
 #define MDM_MANUFACTURER_LENGTH		  10
@@ -51,6 +53,7 @@
 #define MDM_APN_LENGTH			  32
 #define RSSI_TIMEOUT_SECS		  30
 
+#define MDM_UNSOL_RDY			CONFIG_MODEM_QUECTEL_BG9X_UNSOL_RDY
 #define MDM_APN				  CONFIG_MODEM_QUECTEL_BG9X_APN
 #define MDM_USERNAME			  CONFIG_MODEM_QUECTEL_BG9X_USERNAME
 #define MDM_PASSWORD			  CONFIG_MODEM_QUECTEL_BG9X_PASSWORD
@@ -64,6 +67,9 @@ enum mdm_control_pins {
 	MDM_RESET,
 #if DT_INST_NODE_HAS_PROP(0, mdm_dtr_gpios)
 	MDM_DTR,
+#endif
+#if DT_INST_NODE_HAS_PROP(0, mdm_wdisable_gpios)
+	MDM_WDISABLE,
 #endif
 };
 
@@ -85,7 +91,7 @@ struct modem_data {
 	struct modem_socket sockets[MDM_MAX_SOCKETS];
 
 	/* RSSI work */
-	struct k_delayed_work rssi_query_work;
+	struct k_work_delayable rssi_query_work;
 
 	/* modem data */
 	char mdm_manufacturer[MDM_MANUFACTURER_LENGTH];
@@ -96,6 +102,7 @@ struct modem_data {
 	char mdm_imsi[MDM_IMSI_LENGTH];
 	char mdm_iccid[MDM_ICCID_LENGTH];
 #endif /* #if defined(CONFIG_MODEM_SIM_NUMBERS) */
+	int mdm_rssi;
 
 	/* bytes written to socket in last transaction */
 	int sock_written;
@@ -107,6 +114,9 @@ struct modem_data {
 	struct k_sem sem_response;
 	struct k_sem sem_tx_ready;
 	struct k_sem sem_sock_conn;
+#if !DT_INST_NODE_HAS_PROP(0, mdm_reset_gpios)
+	struct k_sem sem_pin_busy;
+#endif
 };
 
 /* Socket read callback data */
@@ -117,24 +127,4 @@ struct socket_read_data {
 	uint16_t	 recv_read_len;
 };
 
-/* Modem pins - Power, Reset & others. */
-static struct modem_pin modem_pins[] = {
-	/* MDM_POWER */
-	MODEM_PIN(DT_INST_GPIO_LABEL(0, mdm_power_gpios),
-		  DT_INST_GPIO_PIN(0, mdm_power_gpios),
-		  DT_INST_GPIO_FLAGS(0, mdm_power_gpios) | GPIO_OUTPUT_LOW),
-
-	/* MDM_RESET */
-	MODEM_PIN(DT_INST_GPIO_LABEL(0, mdm_reset_gpios),
-		  DT_INST_GPIO_PIN(0, mdm_reset_gpios),
-		  DT_INST_GPIO_FLAGS(0, mdm_reset_gpios) | GPIO_OUTPUT_LOW),
-
-#if DT_INST_NODE_HAS_PROP(0, mdm_dtr_gpios)
-	/* MDM_DTR */
-	MODEM_PIN(DT_INST_GPIO_LABEL(0, mdm_dtr_gpios),
-		  DT_INST_GPIO_PIN(0, mdm_dtr_gpios),
-		  DT_INST_GPIO_FLAGS(0, mdm_dtr_gpios) | GPIO_OUTPUT_LOW),
-#endif
-};
-
-#endif /* #ifndef QUECTEL_BG9X_H */
+#endif /* QUECTEL_BG9X_H */

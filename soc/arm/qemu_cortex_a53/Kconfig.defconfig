@@ -3,13 +3,12 @@
 
 if SOC_QEMU_CORTEX_A53
 
-config SOC
-	default "qemu_cortex_a53"
-
 config NUM_IRQS
 	# must be >= the highest interrupt number used
 	# - include the UART interrupts
-	default 220
+	# - LPIs (starting at 8192) if GIC_V3_ITS is used
+	default 16384 if GIC_V3_ITS
+	default 220 if !GIC_V3_ITS
 
 config SYS_CLOCK_HW_CYCLES_PER_SEC
 	default 62500000

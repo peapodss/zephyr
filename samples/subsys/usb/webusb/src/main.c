@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2016-2019 Intel Corporation
+ * Copyright (c) 2023 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,40 +15,77 @@
  */
 
 #define LOG_LEVEL CONFIG_USB_DEVICE_LOG_LEVEL
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main);
 
-#include <sys/byteorder.h>
-#include <usb/usb_common.h>
-#include <usb/usb_device.h>
-#include <usb/bos.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/usb/bos.h>
+#include <zephyr/usb/msos_desc.h>
 
 #include "webusb.h"
 
-/* Predefined response to control commands related to MS OS 2.0 descriptors */
-static const uint8_t msos2_descriptor[] = {
-	/* MS OS 2.0 set header descriptor   */
-	0x0A, 0x00,             /* Descriptor size (10 bytes)                 */
-	0x00, 0x00,             /* MS_OS_20_SET_HEADER_DESCRIPTOR             */
-	0x00, 0x00, 0x03, 0x06, /* Windows version (8.1) (0x06030000)         */
-	(0x0A + 0x14 + 0x08), 0x00, /* Length of the MS OS 2.0 descriptor set */
+/* random GUID {FA611CC3-7057-42EE-9D82-4919639562B3} */
+#define WEBUSB_DEVICE_INTERFACE_GUID \
+	'{', 0x00, 'F', 0x00, 'A', 0x00, '6', 0x00, '1', 0x00, '1', 0x00, \
+	'C', 0x00, 'C', 0x00, '3', 0x00, '-', 0x00, '7', 0x00, '0', 0x00, \
+	'5', 0x00, '7', 0x00, '-', 0x00, '4', 0x00, '2', 0x00, 'E', 0x00, \
+	'E', 0x00, '-', 0x00, '9', 0x00, 'D', 0x00, '8', 0x00, '2', 0x00, \
+	'-', 0x00, '4', 0x00, '9', 0x00, '1', 0x00, '9', 0x00, '6', 0x00, \
+	'3', 0x00, '9', 0x00, '5', 0x00, '6', 0x00, '2', 0x00, 'B', 0x00, \
+	'3', 0x00, '}', 0x00, 0x00, 0x00, 0x00, 0x00
 
-	/* MS OS 2.0 function subset ID descriptor
-	 * This means that the descriptors below will only apply to one
-	 * set of interfaces
+#define COMPATIBLE_ID_WINUSB \
+	'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00
+
+static struct msosv2_descriptor_t {
+	struct msosv2_descriptor_set_header header;
+#if defined(CONFIG_USB_CDC_ACM)
+	struct msosv2_function_subset_header subset_header;
+#endif
+	struct msosv2_compatible_id webusb_compatible_id;
+	struct msosv2_guids_property webusb_guids_property;
+} __packed msosv2_descriptor = {
+	/* Microsoft OS 2.0 descriptor set
+	 * This tells Windows what kind of device this is and to install the WinUSB driver.
 	 */
-	0x08, 0x00, /* Descriptor size (8 bytes) */
-	0x02, 0x00, /* MS_OS_20_SUBSET_HEADER_FUNCTION */
-	0x02,       /* Index of first interface this subset applies to. */
-	0x00,       /* reserved */
-	(0x08 + 0x14), 0x00, /* Length of the MS OS 2.0 descriptor subset */
-
-	/* MS OS 2.0 compatible ID descriptor */
-	0x14, 0x00, /* Descriptor size                */
-	0x03, 0x00, /* MS_OS_20_FEATURE_COMPATIBLE_ID */
-	/* 8-byte compatible ID string, then 8-byte sub-compatible ID string */
-	'W',  'I',  'N',  'U',  'S',  'B',  0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	.header = {
+		.wLength = sizeof(struct msosv2_descriptor_set_header),
+		.wDescriptorType = MS_OS_20_SET_HEADER_DESCRIPTOR,
+		.dwWindowsVersion = 0x06030000,
+		.wTotalLength = sizeof(struct msosv2_descriptor_t),
+	},
+#if defined(CONFIG_USB_CDC_ACM)
+	/* If CONFIG_USB_CDC_ACM is selected, extra interfaces will be added on build time,
+	 * making the target a composite device, which requires an extra Function
+	 * Subset Header.
+	 */
+	.subset_header = {
+		.wLength = sizeof(struct msosv2_function_subset_header),
+		.wDescriptorType = MS_OS_20_SUBSET_HEADER_FUNCTION,
+		/* The WebUSB interface number becomes the first when CDC_ACM is enabled by
+		 * configuration.  Beware that if this sample is used as an inspiration for
+		 * applications, where the WebUSB interface is no longer the first,
+		 * remember to adjust bFirstInterface.
+		 */
+		.bFirstInterface = 0,
+		.wSubsetLength = 160
+	},
+#endif
+	.webusb_compatible_id = {
+		.wLength = sizeof(struct msosv2_compatible_id),
+		.wDescriptorType = MS_OS_20_FEATURE_COMPATIBLE_ID,
+		.CompatibleID = {COMPATIBLE_ID_WINUSB},
+	},
+	.webusb_guids_property = {
+		.wLength = sizeof(struct msosv2_guids_property),
+		.wDescriptorType = MS_OS_20_FEATURE_REG_PROPERTY,
+		.wPropertyDataType = MS_OS_20_PROPERTY_DATA_REG_MULTI_SZ,
+		.wPropertyNameLength = 42,
+		.PropertyName = {DEVICE_INTERFACE_GUIDS_PROPERTY_NAME},
+		.wPropertyDataLength = 80,
+		.bPropertyData = {WEBUSB_DEVICE_INTERFACE_GUID},
+	},
 };
 
 USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_webusb_desc {
@@ -60,7 +98,7 @@ USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_webusb_desc {
 	.platform = {
 		.bLength = sizeof(struct usb_bos_platform_descriptor)
 			+ sizeof(struct usb_bos_capability_webusb),
-		.bDescriptorType = USB_DEVICE_CAPABILITY_DESC,
+		.bDescriptorType = USB_DESC_DEVICE_CAPABILITY,
 		.bDevCapabilityType = USB_BOS_CAPABILITY_PLATFORM,
 		.bReserved = 0,
 		/* WebUSB Platform Capability UUID
@@ -95,7 +133,7 @@ USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_msosv2_desc {
 	.platform = {
 		.bLength = sizeof(struct usb_bos_platform_descriptor)
 			+ sizeof(struct usb_bos_capability_msos),
-		.bDescriptorType = USB_DEVICE_CAPABILITY_DESC,
+		.bDescriptorType = USB_DESC_DEVICE_CAPABILITY,
 		.bDevCapabilityType = USB_BOS_CAPABILITY_PLATFORM,
 		.bReserved = 0,
 		.PlatformCapabilityUUID = {
@@ -114,7 +152,8 @@ USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_msosv2_desc {
 		/* Windows version (8.1) (0x06030000) */
 		.dwWindowsVersion = sys_cpu_to_le32(0x06030000),
 		.wMSOSDescriptorSetTotalLength =
-			sys_cpu_to_le16(sizeof(msos2_descriptor)),
+			sys_cpu_to_le16(sizeof(msosv2_descriptor)),
+		/* Arbitrary code that is used as bRequest for vendor command */
 		.bMS_VendorCode = 0x02,
 		.bAltEnumCode = 0x00
 	},
@@ -122,13 +161,16 @@ USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_msosv2_desc {
 
 USB_DEVICE_BOS_DESC_DEFINE_CAP struct usb_bos_capability_lpm bos_cap_lpm = {
 	.bLength = sizeof(struct usb_bos_capability_lpm),
-	.bDescriptorType = USB_DEVICE_CAPABILITY_DESC,
+	.bDescriptorType = USB_DESC_DEVICE_CAPABILITY,
 	.bDevCapabilityType = USB_BOS_CAPABILITY_EXTENSION,
 	/**
+	 * Currently there is not a single device driver in Zephyr that supports
+	 * LPM. Moreover, Zephyr USB stack does not have LPM support, so do not
+	 * falsely claim to support LPM.
 	 * BIT(1) - LPM support
 	 * BIT(2) - BESL support
 	 */
-	.bmAttributes = BIT(1) | BIT(2),
+	.bmAttributes = 0,
 };
 
 /* WebUSB Device Requests */
@@ -171,7 +213,7 @@ static struct string_desc {
 
 } __packed msos1_string_descriptor = {
 	.bLength = MSOS_STRING_LENGTH,
-	.bDescriptorType = USB_STRING_DESC,
+	.bDescriptorType = USB_DESC_STRING,
 	/* Signature MSFT100 */
 	.bString = {
 		'M', 0x00, 'S', 0x00, 'F', 0x00, 'T', 0x00,
@@ -213,8 +255,12 @@ static const uint8_t msos1_compatid_descriptor[] = {
 int custom_handle_req(struct usb_setup_packet *pSetup,
 		      int32_t *len, uint8_t **data)
 {
-	if (GET_DESC_TYPE(pSetup->wValue) == USB_STRING_DESC &&
-	    GET_DESC_INDEX(pSetup->wValue) == 0xEE) {
+	if (usb_reqtype_is_to_device(pSetup)) {
+		return -ENOTSUP;
+	}
+
+	if (USB_GET_DESCRIPTOR_TYPE(pSetup->wValue) == USB_DESC_STRING &&
+	    USB_GET_DESCRIPTOR_INDEX(pSetup->wValue) == 0xEE) {
 		*data = (uint8_t *)(&msos1_string_descriptor);
 		*len = sizeof(msos1_string_descriptor);
 
@@ -239,6 +285,10 @@ int custom_handle_req(struct usb_setup_packet *pSetup,
 int vendor_handle_req(struct usb_setup_packet *pSetup,
 		      int32_t *len, uint8_t **data)
 {
+	if (usb_reqtype_is_to_device(pSetup)) {
+		return -ENOTSUP;
+	}
+
 	/* Get Allowed origins request */
 	if (pSetup->bRequest == 0x01 && pSetup->wIndex == 0x01) {
 		*data = (uint8_t *)(&webusb_allowed_origins);
@@ -249,7 +299,7 @@ int vendor_handle_req(struct usb_setup_packet *pSetup,
 		return 0;
 	} else if (pSetup->bRequest == 0x01 && pSetup->wIndex == 0x02) {
 		/* Get URL request */
-		uint8_t index = GET_DESC_INDEX(pSetup->wValue);
+		uint8_t index = USB_GET_DESCRIPTOR_INDEX(pSetup->wValue);
 
 		if (index == 0U || index > NUMBER_OF_ALLOWED_ORIGINS) {
 			return -ENOTSUP;
@@ -261,11 +311,11 @@ int vendor_handle_req(struct usb_setup_packet *pSetup,
 		LOG_DBG("Get webusb_origin_url");
 
 		return 0;
-	} else if (pSetup->bRequest == 0x02 && pSetup->wIndex == 0x07) {
+	} else if (pSetup->bRequest == bos_cap_msosv2.cap.bMS_VendorCode &&
+		   pSetup->wIndex == MS_OS_20_DESCRIPTOR_INDEX) {
 		/* Get MS OS 2.0 Descriptors request */
-		/* 0x07 means "MS_OS_20_DESCRIPTOR_INDEX" */
-		*data = (uint8_t *)(&msos2_descriptor);
-		*len = sizeof(msos2_descriptor);
+		*data = (uint8_t *)(&msosv2_descriptor);
+		*len = sizeof(msosv2_descriptor);
 
 		LOG_DBG("Get MS OS Descriptors v2");
 
@@ -278,7 +328,7 @@ int vendor_handle_req(struct usb_setup_packet *pSetup,
 		*data = (uint8_t *)(&msos1_compatid_descriptor);
 		*len = sizeof(msos1_compatid_descriptor);
 
-		LOG_DBG("Get MS OS Descriptors CompatibeID");
+		LOG_DBG("Get MS OS Descriptors CompatibleID");
 
 		return 0;
 	}
@@ -292,7 +342,7 @@ static struct webusb_req_handlers req_handlers = {
 	.vendor_handler = vendor_handle_req,
 };
 
-void main(void)
+int main(void)
 {
 	int ret;
 
@@ -308,6 +358,7 @@ void main(void)
 	ret = usb_enable(NULL);
 	if (ret != 0) {
 		LOG_ERR("Failed to enable USB");
-		return;
+		return 0;
 	}
+	return 0;
 }

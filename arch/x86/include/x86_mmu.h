@@ -12,8 +12,9 @@
 #ifndef ZEPHYR_ARCH_X86_INCLUDE_X86_MMU_H
 #define ZEPHYR_ARCH_X86_INCLUDE_X86_MMU_H
 
-#include <kernel.h>
-#include <arch/x86/mmustructs.h>
+#include <zephyr/kernel.h>
+#include <zephyr/arch/x86/mmustructs.h>
+#include <zephyr/kernel/mm.h>
 
 #if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
 #define XD_SUPPORTED
@@ -64,6 +65,8 @@
 #define PF_ID		BIT(4)  /* 1 instruction fetch */
 #define PF_PK		BIT(5)  /* 1 protection-key violation */
 #define PF_SGX		BIT(15) /* 1 SGX-specific access control requirements */
+
+#ifndef _ASMLANGUAGE
 
 #ifdef CONFIG_EXCEPTION_DEBUG
 /**
@@ -117,7 +120,7 @@ void z_x86_pentry_get(int *paging_level, pentry_t *val, pentry_t *ptables,
 void z_x86_dump_page_tables(pentry_t *ptables);
 #endif /* CONFIG_EXCEPTION_DEBUG */
 
-#ifdef CONFIG_HW_STACK_PROTECTION
+#ifdef CONFIG_X86_STACK_PROTECTION
 /* Legacy function - set identity-mapped MMU stack guard page to RO in the
  * kernel's page tables to prevent writes and generate an exception
  */
@@ -131,6 +134,13 @@ void z_x86_set_stack_guard(k_thread_stack_t *stack);
  * IDT, etc)
  */
 extern uint8_t z_shared_kernel_page_start;
+
+#ifdef CONFIG_DEMAND_PAGING
+/* Called from page fault handler. ptables here is the ptage tables for the
+ * faulting user thread and not the current set of page tables
+ */
+extern bool z_x86_kpti_is_access_ok(void *virt, pentry_t *ptables)
+#endif /* CONFIG_DEMAND_PAGING */
 #endif /* CONFIG_X86_KPTI */
 #endif /* CONFIG_USERSPACE */
 
@@ -172,7 +182,7 @@ static inline uintptr_t z_x86_cr3_get(void)
 /* Return the virtual address of the page tables installed in this CPU in CR3 */
 static inline pentry_t *z_x86_page_tables_get(void)
 {
-	return (pentry_t *)z_x86_cr3_get();
+	return k_mem_virt_addr(z_x86_cr3_get());
 }
 
 /* Return cr2 value, which contains the page fault linear address.
@@ -199,10 +209,18 @@ extern pentry_t z_x86_kernel_ptables[];
 static inline pentry_t *z_x86_thread_page_tables_get(struct k_thread *thread)
 {
 #if defined(CONFIG_USERSPACE) && !defined(CONFIG_X86_COMMON_PAGE_TABLE)
-	return (pentry_t *)(thread->arch.ptables);
+	if (!IS_ENABLED(CONFIG_X86_KPTI) ||
+	    (thread->base.user_options & K_USER) != 0U) {
+		/* If KPTI is enabled, supervisor threads always use
+		 * the kernel's page tables and not the page tables associated
+		 * with their memory domain.
+		 */
+		return k_mem_virt_addr(thread->arch.ptables);
+	}
 #else
-	return z_x86_kernel_ptables;
+	ARG_UNUSED(thread);
 #endif
+	return z_x86_kernel_ptables;
 }
 
 #ifdef CONFIG_SMP
@@ -213,4 +231,8 @@ void z_x86_tlb_ipi(const void *arg);
 #ifdef CONFIG_X86_COMMON_PAGE_TABLE
 void z_x86_swap_update_common_page_table(struct k_thread *incoming);
 #endif
+
+/* Early-boot paging setup tasks, called from prep_c */
+void z_x86_mmu_init(void);
+#endif /* _ASMLANGUAGE */
 #endif /* ZEPHYR_ARCH_X86_INCLUDE_X86_MMU_H */

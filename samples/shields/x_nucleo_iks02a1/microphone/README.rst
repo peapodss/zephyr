@@ -1,7 +1,8 @@
-.. _x-nucleo-iks02a1-mic-sample:
+.. zephyr:code-sample:: x-nucleo-iks02a1-mic
+   :name: X-NUCLEO-IKS02A1 shield - MEMS microphone
+   :relevant-api: audio_dmic_interface
 
-X-NUCLEO-IKS02A1 shield: Acquire MEMS microphones data
-######################################################
+   Acquire audio using the digital MEMS microphone on X-NUCLEO-IKS02A1 shield.
 
 Overview
 ********
@@ -9,7 +10,7 @@ This sample enables the digital MEMS microphone on X-NUCLEO-IKS02A1
 shields
 
 This sample provides an example of how to acquire audio through
-the digital MEMS microphones on X-NUCLEO-IKS02A1 shield.
+the digital MEMS microphone on X-NUCLEO-IKS02A1 shield.
 The microphone generates a PDM stream which is acquired through I2S.
 The PDM stream is then converted to PCM using the OpenPDM2PCM library
 available in zephyrproject/modules/hal/st/audio/microphone.
@@ -18,13 +19,14 @@ Requirements
 ************
 
 This sample communicates over I2C with the X-NUCLEO-IKS02A1 shield
-stacked on a board with an Arduino connector. The board's I2C must be
-configured for the I2C Arduino connector (both for pin muxing
-and device tree). See for example the :ref:`nucleo_f411re_board` board
-source code:
+stacked on a board with an Arduino connector.
 
-- :zephyr_file:`boards/arm/nucleo_f411re/nucleo_f411re.dts`
-- :zephyr_file:`boards/arm/nucleo_f411re/pinmux.c`
+.. note::
+
+   Please note that, in order to make the shield working on top of this board,
+   it is needed to have SB24 and SB29 solder bridges properly closed. In this way
+   the PDM microphone clock and data lines get connected to SPI clock and MOSI.
+   Similar consideration may apply to other boards as well.
 
 References
 **********
@@ -44,19 +46,18 @@ To build the sample you can use following command:
    :goals: build
    :compact:
 
-Please note that, in order to make the shield working on top of this board, it is needed to have
-SB24 and SB29 solder bridges properly closed. In this way the PDM
-microphone clock and data lines get connected to SPI clock and MOSI.
-Similar consideration may apply to other boards as well.
+.. note::
 
-One of the things that must be verified before building the sample is the I2S output clock frequency
-configuration. For example, for nucleo_f441re board, we have the following shield file that
-configures the I2SPLL and have a dependency on HSE/HSI:
-:zephyr_file:`boards/shields/x_nucleo_iks02a1/boards/nucleo_f411re.defconfig`
+   In case a different board is used, one of the things that must be verified before
+   building the sample is the I2S output clock frequency configuration. For example,
+   for nucleo_f411re board, we have the following file that configures the I2SPLL and
+   have a dependency on HSE/HSI:
+   :zephyr_file:`boards/shields/x_nucleo_iks02a1/boards/nucleo_f411re.overlay`
 
-The user is invited to to verify which osci is configured on the used host board defconfig file
-and calculate the final I2SClk frequency:
-:zephyr_file:`boards/arm/nucleo_f411re/nucleo_f411re_defconfig`
+   The user is invited to verify which osci is configured on the used host board
+   defconfig file and calculate the final I2SClk frequency, e.g.
+   :zephyr_file:`boards/st/nucleo_f411re/nucleo_f411re.dts`
+
 
 Sample Output
 =============
@@ -91,7 +92,7 @@ as a USB CDC class, and will use ``/dev/ttyACM0``
 device for communication. The ``/dev/ttyACM0`` port
 must be configured in raw mode to avoid having
 special characters (such as :kbd:`CTRL-Z` or :kbd:`CTRL-D`)
-processed or 'cooked' out.
+processed and 'cooked out'.
 
 .. code-block:: console
 
@@ -99,9 +100,20 @@ processed or 'cooked' out.
    cat /dev/ttyACM0 > /tmp/sound.raw
    dos2unix -f /tmp/sound.raw
 
-.. note:: The dos2unix command is used to recover the situation in which the character 0x0a is
+.. note::
+
+   The dos2unix command is used to recover the situation in which the character 0x0a is
    interpreted as NL and an 0x0d (CR) is added. If you don't remove it the audio stream would
    get corrupted.
+
+.. warning::
+
+   The /tmp/sound.raw file final size should result exactly of 32000 byte, but sometimes may
+   happen that 1 or 2 spurious 0x00 bytes are put at the beginning. In this case the user
+   may get rid of them using the following linux command (change ``skip`` value according
+   to number of spurious bytes to be removed):
+
+   dd if=sound.raw of=sound_clean.raw bs=1 skip=1
 
 
 ASCII PCM Output

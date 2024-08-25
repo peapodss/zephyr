@@ -4,18 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <spinlock.h>
+#include <zephyr/kernel.h>
+#include <zephyr/spinlock.h>
 #include <ksched.h>
 #include <timeout_q.h>
-#include <syscall_handler.h>
-#include <drivers/timer/system_timer.h>
-#include <sys_clock.h>
-
-#define LOCKED(lck) for (k_spinlock_key_t __i = {},			\
-					  __key = k_spin_lock(lck);	\
-			__i.key == 0;					\
-			k_spin_unlock(lck, __key), __i.key = 1)
+#include <zephyr/internal/syscall_handler.h>
+#include <zephyr/drivers/timer/system_timer.h>
+#include <zephyr/sys_clock.h>
 
 static uint64_t curr_tick;
 
@@ -26,18 +21,18 @@ static struct k_spinlock timeout_lock;
 #define MAX_WAIT (IS_ENABLED(CONFIG_SYSTEM_CLOCK_SLOPPY_IDLE) \
 		  ? K_TICKS_FOREVER : INT_MAX)
 
-/* Cycles left to process in the currently-executing z_clock_announce() */
+/* Ticks left to process in the currently-executing sys_clock_announce() */
 static int announce_remaining;
 
 #if defined(CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME)
 int z_clock_hw_cycles_per_sec = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
 
 #ifdef CONFIG_USERSPACE
-static inline int z_vrfy_z_clock_hw_cycles_per_sec_runtime_get(void)
+static inline int z_vrfy_sys_clock_hw_cycles_per_sec_runtime_get(void)
 {
-	return z_impl_z_clock_hw_cycles_per_sec_runtime_get();
+	return z_impl_sys_clock_hw_cycles_per_sec_runtime_get();
 }
-#include <syscalls/z_clock_hw_cycles_per_sec_runtime_get_mrsh.c>
+#include <zephyr/syscalls/sys_clock_hw_cycles_per_sec_runtime_get_mrsh.c>
 #endif /* CONFIG_USERSPACE */
 #endif /* CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME */
 
@@ -45,14 +40,14 @@ static struct _timeout *first(void)
 {
 	sys_dnode_t *t = sys_dlist_peek_head(&timeout_list);
 
-	return t == NULL ? NULL : CONTAINER_OF(t, struct _timeout, node);
+	return (t == NULL) ? NULL : CONTAINER_OF(t, struct _timeout, node);
 }
 
 static struct _timeout *next(struct _timeout *t)
 {
 	sys_dnode_t *n = sys_dlist_peek_next(&timeout_list, &t->node);
 
-	return n == NULL ? NULL : CONTAINER_OF(n, struct _timeout, node);
+	return (n == NULL) ? NULL : CONTAINER_OF(n, struct _timeout, node);
 }
 
 static void remove_timeout(struct _timeout *t)
@@ -66,21 +61,38 @@ static void remove_timeout(struct _timeout *t)
 
 static int32_t elapsed(void)
 {
-	return announce_remaining == 0 ? z_clock_elapsed() : 0U;
+	/* While sys_clock_announce() is executing, new relative timeouts will be
+	 * scheduled relatively to the currently firing timeout's original tick
+	 * value (=curr_tick) rather than relative to the current
+	 * sys_clock_elapsed().
+	 *
+	 * This means that timeouts being scheduled from within timeout callbacks
+	 * will be scheduled at well-defined offsets from the currently firing
+	 * timeout.
+	 *
+	 * As a side effect, the same will happen if an ISR with higher priority
+	 * preempts a timeout callback and schedules a timeout.
+	 *
+	 * The distinction is implemented by looking at announce_remaining which
+	 * will be non-zero while sys_clock_announce() is executing and zero
+	 * otherwise.
+	 */
+	return announce_remaining == 0 ? sys_clock_elapsed() : 0U;
 }
 
 static int32_t next_timeout(void)
 {
 	struct _timeout *to = first();
 	int32_t ticks_elapsed = elapsed();
-	int32_t ret = to == NULL ? MAX_WAIT
-		: CLAMP(to->dticks - ticks_elapsed, 0, MAX_WAIT);
+	int32_t ret;
 
-#ifdef CONFIG_TIMESLICING
-	if (_current_cpu->slice_ticks && _current_cpu->slice_ticks < ret) {
-		ret = _current_cpu->slice_ticks;
+	if ((to == NULL) ||
+	    ((int64_t)(to->dticks - ticks_elapsed) > (int64_t)INT_MAX)) {
+		ret = MAX_WAIT;
+	} else {
+		ret = MAX(0, to->dticks - ticks_elapsed);
 	}
-#endif
+
 	return ret;
 }
 
@@ -91,28 +103,25 @@ void z_add_timeout(struct _timeout *to, _timeout_func_t fn,
 		return;
 	}
 
-#ifdef KERNEL_COHERENCE
+#ifdef CONFIG_KERNEL_COHERENCE
 	__ASSERT_NO_MSG(arch_mem_coherent(to));
-#endif
-
-#ifdef CONFIG_LEGACY_TIMEOUT_API
-	k_ticks_t ticks = timeout;
-#else
-	k_ticks_t ticks = timeout.ticks + 1;
-
-	if (IS_ENABLED(CONFIG_TIMEOUT_64BIT) && Z_TICK_ABS(ticks) >= 0) {
-		ticks = Z_TICK_ABS(ticks) - (curr_tick + elapsed());
-	}
-#endif
+#endif /* CONFIG_KERNEL_COHERENCE */
 
 	__ASSERT(!sys_dnode_is_linked(&to->node), "");
 	to->fn = fn;
-	ticks = MAX(1, ticks);
 
-	LOCKED(&timeout_lock) {
+	K_SPINLOCK(&timeout_lock) {
 		struct _timeout *t;
 
-		to->dticks = ticks + elapsed();
+		if (IS_ENABLED(CONFIG_TIMEOUT_64BIT) &&
+		    (Z_TICK_ABS(timeout.ticks) >= 0)) {
+			k_ticks_t ticks = Z_TICK_ABS(timeout.ticks) - curr_tick;
+
+			to->dticks = MAX(1, ticks);
+		} else {
+			to->dticks = timeout.ticks + 1 + elapsed();
+		}
+
 		for (t = first(); t != NULL; t = next(t)) {
 			if (t->dticks > to->dticks) {
 				t->dticks -= to->dticks;
@@ -126,8 +135,8 @@ void z_add_timeout(struct _timeout *to, _timeout_func_t fn,
 			sys_dlist_append(&timeout_list, &to->node);
 		}
 
-		if (to == first()) {
-			z_clock_set_timeout(next_timeout(), false);
+		if (to == first() && announce_remaining == 0) {
+			sys_clock_set_timeout(next_timeout(), false);
 		}
 	}
 }
@@ -136,7 +145,7 @@ int z_abort_timeout(struct _timeout *to)
 {
 	int ret = -EINVAL;
 
-	LOCKED(&timeout_lock) {
+	K_SPINLOCK(&timeout_lock) {
 		if (sys_dnode_is_linked(&to->node)) {
 			remove_timeout(to);
 			ret = 0;
@@ -151,10 +160,6 @@ static k_ticks_t timeout_rem(const struct _timeout *timeout)
 {
 	k_ticks_t ticks = 0;
 
-	if (z_is_inactive_timeout(timeout)) {
-		return 0;
-	}
-
 	for (struct _timeout *t = first(); t != NULL; t = next(t)) {
 		ticks += t->dticks;
 		if (timeout == t) {
@@ -162,15 +167,17 @@ static k_ticks_t timeout_rem(const struct _timeout *timeout)
 		}
 	}
 
-	return ticks - elapsed();
+	return ticks;
 }
 
 k_ticks_t z_timeout_remaining(const struct _timeout *timeout)
 {
 	k_ticks_t ticks = 0;
 
-	LOCKED(&timeout_lock) {
-		ticks = timeout_rem(timeout);
+	K_SPINLOCK(&timeout_lock) {
+		if (!z_is_inactive_timeout(timeout)) {
+			ticks = timeout_rem(timeout) - elapsed();
+		}
 	}
 
 	return ticks;
@@ -180,8 +187,11 @@ k_ticks_t z_timeout_expires(const struct _timeout *timeout)
 {
 	k_ticks_t ticks = 0;
 
-	LOCKED(&timeout_lock) {
-		ticks = curr_tick + timeout_rem(timeout);
+	K_SPINLOCK(&timeout_lock) {
+		ticks = curr_tick;
+		if (!z_is_inactive_timeout(timeout)) {
+			ticks += timeout_rem(timeout);
+		}
 	}
 
 	return ticks;
@@ -191,94 +201,85 @@ int32_t z_get_next_timeout_expiry(void)
 {
 	int32_t ret = (int32_t) K_TICKS_FOREVER;
 
-	LOCKED(&timeout_lock) {
+	K_SPINLOCK(&timeout_lock) {
 		ret = next_timeout();
 	}
 	return ret;
 }
 
-void z_set_timeout_expiry(int32_t ticks, bool is_idle)
+void sys_clock_announce(int32_t ticks)
 {
-	LOCKED(&timeout_lock) {
-		int next_to = next_timeout();
-		bool sooner = (next_to == K_TICKS_FOREVER)
-			      || (ticks < next_to);
-		bool imminent = next_to <= 1;
-
-		/* Only set new timeouts when they are sooner than
-		 * what we have.  Also don't try to set a timeout when
-		 * one is about to expire: drivers have internal logic
-		 * that will bump the timeout to the "next" tick if
-		 * it's not considered to be settable as directed.
-		 * SMP can't use this optimization though: we don't
-		 * know when context switches happen until interrupt
-		 * exit and so can't get the timeslicing clamp folded
-		 * in.
-		 */
-		if (!imminent && (sooner || IS_ENABLED(CONFIG_SMP))) {
-			z_clock_set_timeout(ticks, is_idle);
-		}
-	}
-}
-
-void z_clock_announce(int32_t ticks)
-{
-#ifdef CONFIG_TIMESLICING
-	z_time_slice(ticks);
-#endif
-
 	k_spinlock_key_t key = k_spin_lock(&timeout_lock);
+
+	/* We release the lock around the callbacks below, so on SMP
+	 * systems someone might be already running the loop.  Don't
+	 * race (which will cause parallel execution of "sequential"
+	 * timeouts and confuse apps), just increment the tick count
+	 * and return.
+	 */
+	if (IS_ENABLED(CONFIG_SMP) && (announce_remaining != 0)) {
+		announce_remaining += ticks;
+		k_spin_unlock(&timeout_lock, key);
+		return;
+	}
 
 	announce_remaining = ticks;
 
-	while (first() != NULL && first()->dticks <= announce_remaining) {
-		struct _timeout *t = first();
+	struct _timeout *t;
+
+	for (t = first();
+	     (t != NULL) && (t->dticks <= announce_remaining);
+	     t = first()) {
 		int dt = t->dticks;
 
 		curr_tick += dt;
-		announce_remaining -= dt;
 		t->dticks = 0;
 		remove_timeout(t);
 
 		k_spin_unlock(&timeout_lock, key);
 		t->fn(t);
 		key = k_spin_lock(&timeout_lock);
+		announce_remaining -= dt;
 	}
 
-	if (first() != NULL) {
-		first()->dticks -= announce_remaining;
+	if (t != NULL) {
+		t->dticks -= announce_remaining;
 	}
 
 	curr_tick += announce_remaining;
 	announce_remaining = 0;
 
-	z_clock_set_timeout(next_timeout(), false);
+	sys_clock_set_timeout(next_timeout(), false);
 
 	k_spin_unlock(&timeout_lock, key);
+
+#ifdef CONFIG_TIMESLICING
+	z_time_slice();
+#endif /* CONFIG_TIMESLICING */
 }
 
-int64_t z_tick_get(void)
+int64_t sys_clock_tick_get(void)
 {
 	uint64_t t = 0U;
 
-	LOCKED(&timeout_lock) {
-		t = curr_tick + z_clock_elapsed();
+	K_SPINLOCK(&timeout_lock) {
+		t = curr_tick + elapsed();
 	}
 	return t;
 }
 
-uint32_t z_tick_get_32(void)
+uint32_t sys_clock_tick_get_32(void)
 {
 #ifdef CONFIG_TICKLESS_KERNEL
-	return (uint32_t)z_tick_get();
+	return (uint32_t)sys_clock_tick_get();
 #else
 	return (uint32_t)curr_tick;
-#endif
+#endif /* CONFIG_TICKLESS_KERNEL */
 }
 
 int64_t z_impl_k_uptime_ticks(void)
 {
-	return z_tick_get();
+	return sys_clock_tick_get();
 }
 
 #ifdef CONFIG_USERSPACE
@@ -286,32 +287,54 @@ static inline int64_t z_vrfy_k_uptime_ticks(void)
 {
 	return z_impl_k_uptime_ticks();
 }
-#include <syscalls/k_uptime_ticks_mrsh.c>
-#endif
+#include <zephyr/syscalls/k_uptime_ticks_mrsh.c>
+#endif /* CONFIG_USERSPACE */
 
-/* Returns the uptime expiration (relative to an unlocked "now"!) of a
- * timeout object.  When used correctly, this should be called once,
- * synchronously with the user passing a new timeout value.  It should
- * not be used iteratively to adjust a timeout.
- */
-uint64_t z_timeout_end_calc(k_timeout_t timeout)
+k_timepoint_t sys_timepoint_calc(k_timeout_t timeout)
 {
-	k_ticks_t dt;
+	k_timepoint_t timepoint;
 
 	if (K_TIMEOUT_EQ(timeout, K_FOREVER)) {
-		return UINT64_MAX;
+		timepoint.tick = UINT64_MAX;
 	} else if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
-		return z_tick_get();
+		timepoint.tick = 0;
+	} else {
+		k_ticks_t dt = timeout.ticks;
+
+		if (IS_ENABLED(CONFIG_TIMEOUT_64BIT) && Z_TICK_ABS(dt) >= 0) {
+			timepoint.tick = Z_TICK_ABS(dt);
+		} else {
+			timepoint.tick = sys_clock_tick_get() + MAX(1, dt);
+		}
 	}
 
-#ifdef CONFIG_LEGACY_TIMEOUT_API
-	dt = k_ms_to_ticks_ceil32(timeout);
-#else
-	dt = timeout.ticks;
-
-	if (IS_ENABLED(CONFIG_TIMEOUT_64BIT) && Z_TICK_ABS(dt) >= 0) {
-		return Z_TICK_ABS(dt);
-	}
-#endif
-	return z_tick_get() + MAX(1, dt);
+	return timepoint;
 }
+
+k_timeout_t sys_timepoint_timeout(k_timepoint_t timepoint)
+{
+	uint64_t now, remaining;
+
+	if (timepoint.tick == UINT64_MAX) {
+		return K_FOREVER;
+	}
+	if (timepoint.tick == 0) {
+		return K_NO_WAIT;
+	}
+
+	now = sys_clock_tick_get();
+	remaining = (timepoint.tick > now) ? (timepoint.tick - now) : 0;
+	return K_TICKS(remaining);
+}
+
+#ifdef CONFIG_ZTEST
+void z_impl_sys_clock_tick_set(uint64_t tick)
+{
+	curr_tick = tick;
+}
+
+void z_vrfy_sys_clock_tick_set(uint64_t tick)
+{
+	z_impl_sys_clock_tick_set(tick);
+}
+#endif /* CONFIG_ZTEST */

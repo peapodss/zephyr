@@ -4,16 +4,21 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <string.h>
 
+#include <zephyr/arch/cpu.h>
 #include <zephyr/types.h>
-#include <sys/byteorder.h>
-#include <drivers/entropy.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/drivers/entropy.h>
 
 #include "util.h"
 #include "util/memq.h"
-#include "lll.h"
 
-#include "pdu.h"
+#include "ll_sw/lll.h"
+
+#include "ll_sw/pdu_df.h"
+#include "lll/pdu_vendor.h"
+#include "ll_sw/pdu.h"
 
 /**
  * @brief Population count: Count the number of bits set to 1
@@ -26,7 +31,7 @@
  *
  * @return popcnt of 'octets'
  */
-uint8_t util_ones_count_get(uint8_t *octets, uint8_t octets_len)
+uint8_t util_ones_count_get(const uint8_t *octets, uint8_t octets_len)
 {
 	uint8_t one_count = 0U;
 
@@ -214,4 +219,150 @@ again:
 	sys_put_le32(aa, dst);
 
 	return 0;
+}
+
+#if defined(CONFIG_BT_CTLR_ADV_ISO)
+int util_saa_le32(uint8_t *dst, uint8_t handle)
+{
+	/* Refer to Bluetooth Core Specification Version 5.2 Vol 6, Part B,
+	 * section 2.1.2 Access Address
+	 */
+	uint32_t saa, saa_15, saa_16;
+	uint8_t bits;
+	int err;
+
+	/* Get access address */
+	err = util_aa_le32(dst);
+	if (err) {
+		return err;
+	}
+
+	saa = sys_get_le32(dst);
+
+	/* SAA_19 = SAA_15 */
+	saa_15 = (saa >> 15) & 0x01;
+	saa &= ~BIT(19);
+	saa |= saa_15 << 19;
+
+	/* SAA_16 != SAA_15 */
+	saa &= ~BIT(16);
+	saa_16 = ~saa_15 & 0x01;
+	saa |= saa_16 << 16;
+
+	/* SAA_22 = SAA_16 */
+	saa &= ~BIT(22);
+	saa |= saa_16 << 22;
+
+	/* SAA_25 = 0 */
+	saa &= ~BIT(25);
+
+	/* SAA_23 = 1 */
+	saa |= BIT(23);
+
+	/* For any pair of BIGs transmitted by the same device, the SAA 15-0
+	 * values shall differ in at least two bits.
+	 * - Find the number of bits required to support 3 times the maximum
+	 *   ISO connection handles supported
+	 * - Clear those number many bits
+	 * - Set the value that is 3 times the handle so that consecutive values
+	 *   differ in at least two bits.
+	 */
+	bits = find_msb_set(CONFIG_BT_CTLR_ADV_ISO_SET * 0x03);
+	saa &= ~BIT_MASK(bits);
+	saa |= (handle * 0x03);
+
+	sys_put_le32(saa, dst);
+
+	return 0;
+}
+#endif /* CONFIG_BT_CTLR_ADV_ISO */
+
+#if defined(CONFIG_BT_CTLR_ADV_ISO) || defined(CONFIG_BT_CTLR_SYNC_ISO)
+void util_bis_aa_le32(uint8_t bis, uint8_t *saa, uint8_t *dst)
+{
+	/* Refer to Bluetooth Core Specification Version 5.2 Vol 6, Part B,
+	 * section 2.1.2 Access Address
+	 */
+	uint8_t dwh[2]; /* Holds the two most significant bytes of DW */
+	uint8_t d;
+
+	/* 8-bits for d is enough due to wrapping math and requirement to do
+	 * modulus 128.
+	 */
+	d = ((35 * bis) + 42) & 0x7f;
+
+	/* Most significant 6 bits of DW are bit extension of least significant
+	 * bit of D.
+	 */
+	if (d & 1) {
+		dwh[1] = 0xFC;
+	} else {
+		dwh[1] = 0;
+	}
+
+	/* Set the bits 25 to 17 of DW */
+	dwh[1] |= (d & 0x02) | ((d >> 6) & 0x01);
+	dwh[0] = ((d & 0x02) << 6) | (d & 0x30) | ((d & 0x0C) >> 1);
+
+	/* Most significant 16-bits of SAA XOR DW, least significant 16-bit are
+	 * zeroes, needing no operation on them.
+	 */
+	memcpy(dst, saa, sizeof(uint32_t));
+	dst[3] ^= dwh[1];
+	dst[2] ^= dwh[0];
+}
+#endif /* CONFIG_BT_CTLR_ADV_ISO || CONFIG_BT_CTLR_SYNC_ISO*/
+
+/** @brief Get a bit aligned value from a byte array
+ *  Converts bitsets to any size variable (<= 32 bit), which is returned
+ *  as a uint32_t value.
+ *
+ *  @param data     Pointer to bytes containing the requested value
+ *  @param bit_offs Bit offset into data[0] for value LSB
+ *  @param num_bits Number of bits to extract and convert to value
+ */
+uint32_t util_get_bits(uint8_t *data, uint8_t bit_offs, uint8_t num_bits)
+{
+	uint32_t value;
+	uint8_t  shift, byteIdx, bits;
+
+	value = 0;
+	shift = 0;
+	byteIdx = 0;
+
+	while (num_bits) {
+		bits = MIN(num_bits, 8 - bit_offs);
+		value |= ((data[byteIdx] >> bit_offs) & BIT_MASK(bits)) << shift;
+		shift += bits;
+		num_bits -= bits;
+		bit_offs = 0;
+		byteIdx++;
+	}
+
+	return value;
+}
+
+/** @brief Set a bit aligned value in a byte array
+ *  Converts a value up to 32 bits to a bitset in a byte array.
+ *
+ *  @param data     Pointer to bytes in which to place the value
+ *  @param bit_offs Bit offset into data[0] for value LSB
+ *  @param num_bits Number of bits to set in data
+ */
+void util_set_bits(uint8_t *data, uint8_t bit_offs, uint8_t num_bits,
+		   uint32_t value)
+{
+	uint8_t byteIdx, bits;
+
+	byteIdx = 0;
+
+	while (num_bits) {
+		bits = MIN(num_bits, 8 - bit_offs);
+		data[byteIdx] = (data[byteIdx] & ~(BIT_MASK(bits) << bit_offs)) |
+				((value & BIT_MASK(bits)) << bit_offs);
+		value >>= bits;
+		num_bits -= bits;
+		bit_offs = 0;
+		byteIdx++;
+	}
 }

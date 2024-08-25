@@ -36,13 +36,29 @@ function(runners_yaml_append_config)
   get_runners_prop(elf_file elf "${KERNEL_ELF_NAME}")
   runners_yaml_append("  # Build outputs:")
   runners_yaml_append("  elf_file: ${elf}")
+  if(CONFIG_BUILD_OUTPUT_EXE)
+    get_runners_prop(exe_file exe "${KERNEL_EXE_NAME}")
+  else()
+    get_runners_prop(exe_file exe "")
+  endif()
+  if(exe)
+    runners_yaml_append("  exe_file: ${exe}")
+  endif()
   if(CONFIG_BUILD_OUTPUT_HEX)
     get_runners_prop(hex_file hex "${KERNEL_HEX_NAME}")
+  else()
+    get_runners_prop(hex_file hex "")
+  endif()
+  if(hex)
     runners_yaml_append("  hex_file: ${hex}")
   endif()
   if(CONFIG_BUILD_OUTPUT_BIN)
     get_runners_prop(bin_file bin "${KERNEL_BIN_NAME}")
     runners_yaml_append("  bin_file: ${bin}")
+  endif()
+  if(CONFIG_BUILD_OUTPUT_UF2)
+    get_runners_prop(uf2_file uf2 "${KERNEL_UF2_NAME}")
+    runners_yaml_append("  uf2_file: ${uf2}")
   endif()
 
   if(CMAKE_GDB OR OPENOCD OR OPENOCD_DEFAULT_PATH)
@@ -53,15 +69,15 @@ function(runners_yaml_append_config)
   endif()
   if(OPENOCD)
     runners_yaml_append("  openocd: ${OPENOCD}")
-  endif()
-  if(OPENOCD_DEFAULT_PATH)
-    runners_yaml_append("  openocd_search: ${OPENOCD_DEFAULT_PATH}")
+    runners_yaml_append("  openocd_search:")
+    if(OPENOCD_DEFAULT_PATH)
+      runners_yaml_append("    - ${OPENOCD_DEFAULT_PATH}")
+    endif()
   endif()
   runners_yaml_append("")
 endfunction()
 
-# Save runner state in a YAML file, and put that YAML file's location
-# in the cache.
+# Save runner state in a YAML file.
 function(create_runners_yaml)
   set(runners ${ARGV})
 
@@ -79,6 +95,14 @@ function(create_runners_yaml)
   if(DEFINED BOARD_DEBUG_RUNNER)
     runners_yaml_append("\n# Default debug runner if --runner is not given.")
     runners_yaml_append("debug-runner: ${BOARD_DEBUG_RUNNER}")
+  endif()
+  if(DEFINED BOARD_SIM_RUNNER)
+    runners_yaml_append("\n# Default simulation runner if --runner is not given.")
+    runners_yaml_append("sim-runner: ${BOARD_SIM_RUNNER}")
+  endif()
+  if(DEFINED BOARD_ROBOT_RUNNER)
+    runners_yaml_append("\n# Default test runner if --runner is not given.")
+    runners_yaml_append("robot-runner: ${BOARD_ROBOT_RUNNER}")
   endif()
 
   # Sets up common runner configuration values.
@@ -103,11 +127,9 @@ function(create_runners_yaml)
     endif()
   endforeach()
 
-  # Write the final contents and set its location in the cache.
+  # Write the final contents.
   file(GENERATE OUTPUT "${runners_yaml}" CONTENT
     $<TARGET_PROPERTY:runners_yaml_props_target,yaml_contents>)
-  set(ZEPHYR_RUNNERS_YAML "${runners_yaml}" CACHE INTERNAL
-    "a configuration file for the runners Python package")
 endfunction()
 
 get_property(RUNNERS GLOBAL PROPERTY ZEPHYR_RUNNERS)
@@ -123,10 +145,7 @@ if(RUNNERS)
   create_runners_yaml(${RUNNERS})
 endif()
 
-if(DEFINED ENV{WEST_DIR} AND NOT WEST_DIR)
-  set(WEST_DIR $ENV{WEST_DIR})
-endif(DEFINED ENV{WEST_DIR} AND NOT WEST_DIR)
-
+zephyr_get(WEST_DIR)
 if(WEST_DIR)
   set(WEST "PYTHONPATH=${WEST_DIR}/src" "${PYTHON_EXECUTABLE};${WEST_DIR}/src/west/app/main.py;--zephyr-base=${ZEPHYR_BASE} ")
 endif()
@@ -140,7 +159,7 @@ foreach(target flash debug debugserver attach)
     set(comment "Debugging ${BOARD}")
   elseif(target STREQUAL debugserver)
     set(comment "Debugging ${BOARD}")
-    if(EMU_PLATFORM)
+    if(SUPPORTED_EMU_PLATFORMS)
       # cmake/qemu/CMakeLists.txt will add a debugserver target for
       # emulation platforms, so we don't add one here
       continue()
@@ -159,37 +178,26 @@ foreach(target flash debug debugserver attach)
     set(RUNNER_VERBOSE)
   endif()
 
-  # We pass --skip-rebuild here because the DEPENDS value ensures the
-  # build is already up to date before west is run.
   if(WEST)
-    set(cmd
-      ${CMAKE_COMMAND} -E env
-      ${WEST}
-      ${RUNNER_VERBOSE}
-      ${target}
-      --skip-rebuild
-      DEPENDS ${RUNNERS_DEPS}
-              $<TARGET_PROPERTY:zephyr_property_target,${TARGET_UPPER}_DEPENDENCIES>
-      WORKING_DIRECTORY ${APPLICATION_BINARY_DIR}
-      )
-
     add_custom_target(${target}
+      # This script will print an error message and fail if <target> has added
+      # dependencies. This is done using dedicated CMake script, as
+      # `cmake -E {true|false}` is not available until CMake 3.16.
+      COMMAND ${CMAKE_COMMAND}
+        -DTARGET=${target}
+        -DDEPENDENCIES="$<TARGET_PROPERTY:${target},MANUALLY_ADDED_DEPENDENCIES>"
+        -P ${CMAKE_CURRENT_LIST_DIR}/check_runner_dependencies.cmake
       COMMAND
-      ${cmd}
+        ${CMAKE_COMMAND} -E env
+        ${WEST}
+        ${RUNNER_VERBOSE}
+        ${target}
+      WORKING_DIRECTORY
+        ${APPLICATION_BINARY_DIR}
       COMMENT
-      ${comment}
+        ${comment}
       USES_TERMINAL
-      )
-
-    # This is an artificial target to allow west to ensure all dependencies of
-    # target is build before carrying out the actual command.
-    # This allows `west` to run just the dependencies before flashing.
-    add_custom_target(west_${target}_depends
-      COMMAND ${CMAKE_COMMAND} -E echo ""
-      DEPENDS ${RUNNERS_DEPS}
-              $<TARGET_PROPERTY:zephyr_property_target,${TARGET_UPPER}_DEPENDENCIES>
-      USES_TERMINAL
-      )
+    )
   else()
     add_custom_target(${target}
       COMMAND ${CMAKE_COMMAND} -E echo \"West was not found in path. To support

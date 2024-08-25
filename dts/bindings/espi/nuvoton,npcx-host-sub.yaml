@@ -8,25 +8,20 @@ compatible: "nuvoton,npcx-host-sub"
 include: [base.yaml]
 
 properties:
-    reg:
-      description: mmio register space
-      required: true
+  reg:
+    description: mmio register space
+    required: true
 
-    clocks:
-        required: true
-        description: configurations of device source clock controller
+  clocks:
+    required: true
+    description: configurations of device source clock controller
 
-    pinctrl-0:
-        type: phandles
-        required: true
-        description: configurations of host uart pinmux controllers
+  host-acc-wui:
+    type: phandle
+    required: true
+    description: |
+        Mapping table between Wake-Up Input (WUI) and any legacy host
+        access transactions.
 
-    host_acc_wui:
-        type: phandle
-        required: true
-        description: |
-            Mapping table between Wake-Up Input (WUI) and any legacy host
-            access transactions.
-
-            For example the WUI mapping on NPCX7 would be
-               host_acc_wui = <&wui_host_acc>;
+        For example the WUI mapping on NPCX7 would be
+           host-acc-wui = <&wui_host_acc>;

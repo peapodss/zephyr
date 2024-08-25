@@ -10,27 +10,30 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <zephyr.h>
-#include <arch/cpu.h>
-#include <sys/byteorder.h>
-#include <logging/log.h>
-#include <sys/util.h>
+#include <zephyr/kernel.h>
+#include <zephyr/arch/cpu.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
-#include <device.h>
-#include <init.h>
-#include <drivers/uart.h>
+#include <zephyr/device.h>
+#include <zephyr/init.h>
+#include <zephyr/drivers/uart.h>
 
-#include <net/buf.h>
-#include <bluetooth/bluetooth.h>
-#include <bluetooth/l2cap.h>
-#include <bluetooth/hci.h>
-#include <bluetooth/buf.h>
-#include <bluetooth/hci_raw.h>
+#include <zephyr/usb/usb_device.h>
+
+#include <zephyr/net/buf.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/l2cap.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/buf.h>
+#include <zephyr/bluetooth/hci_raw.h>
 
 #define LOG_MODULE_NAME hci_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
-static const struct device *hci_uart_dev;
+static const struct device *const hci_uart_dev =
+	DEVICE_DT_GET(DT_CHOSEN(zephyr_bt_c2h_uart));
 static K_THREAD_STACK_DEFINE(tx_thread_stack, CONFIG_BT_HCI_TX_STACK_SIZE);
 static struct k_thread tx_thread_data;
 static K_FIFO_DEFINE(tx_queue);
@@ -42,6 +45,7 @@ static K_FIFO_DEFINE(uart_tx_queue);
 #define H4_ACL 0x02
 #define H4_SCO 0x03
 #define H4_EVT 0x04
+#define H4_ISO 0x05
 
 /* Receiver states. */
 #define ST_IDLE 0	/* Waiting for packet type. */
@@ -69,22 +73,40 @@ static int h4_read(const struct device *uart, uint8_t *buf, size_t len)
 
 static bool valid_type(uint8_t type)
 {
-	return (type == H4_CMD) | (type == H4_ACL);
+	return (type == H4_CMD) | (type == H4_ACL) | (type == H4_ISO);
 }
 
-/* Function assumes that type is validated and only CMD or ACL will be used. */
+/* Function expects that type is validated and only CMD, ISO or ACL will be used. */
 static uint32_t get_len(const uint8_t *hdr_buf, uint8_t type)
 {
-	return (type == BT_BUF_CMD) ?
-		((const struct bt_hci_cmd_hdr *)hdr_buf)->param_len :
-		sys_le16_to_cpu(((const struct bt_hci_acl_hdr *)hdr_buf)->len);
+	switch (type) {
+	case H4_CMD:
+		return ((const struct bt_hci_cmd_hdr *)hdr_buf)->param_len;
+	case H4_ISO:
+		return bt_iso_hdr_len(
+			sys_le16_to_cpu(((const struct bt_hci_iso_hdr *)hdr_buf)->len));
+	case H4_ACL:
+		return sys_le16_to_cpu(((const struct bt_hci_acl_hdr *)hdr_buf)->len);
+	default:
+		LOG_ERR("Invalid type: %u", type);
+		return 0;
+	}
 }
 
-/* Function assumes that type is validated and only CMD or ACL will be used. */
+/* Function expects that type is validated and only CMD, ISO or ACL will be used. */
 static int hdr_len(uint8_t type)
 {
-	return (type == H4_CMD) ?
-		sizeof(struct bt_hci_cmd_hdr) : sizeof(struct bt_hci_acl_hdr);
+	switch (type) {
+	case H4_CMD:
+		return sizeof(struct bt_hci_cmd_hdr);
+	case H4_ISO:
+		return sizeof(struct bt_hci_iso_hdr);
+	case H4_ACL:
+		return sizeof(struct bt_hci_acl_hdr);
+	default:
+		LOG_ERR("Invalid type: %u", type);
+		return 0;
+	}
 }
 
 static void rx_isr(void)
@@ -131,6 +153,7 @@ static void rx_isr(void)
 				buf = bt_buf_get_tx(BT_BUF_H4, K_NO_WAIT,
 						    &type, sizeof(type));
 				if (!buf) {
+					LOG_ERR("No available command buffers!");
 					state = ST_IDLE;
 					return;
 				}
@@ -156,7 +179,7 @@ static void rx_isr(void)
 			if (remaining == 0) {
 				/* Packet received */
 				LOG_DBG("putting RX packet in queue.");
-				net_buf_put(&tx_queue, buf);
+				k_fifo_put(&tx_queue, buf);
 				state = ST_IDLE;
 			}
 			break;
@@ -189,7 +212,7 @@ static void tx_isr(void)
 	int len;
 
 	if (!buf) {
-		buf = net_buf_get(&uart_tx_queue, K_NO_WAIT);
+		buf = k_fifo_get(&uart_tx_queue, K_NO_WAIT);
 		if (!buf) {
 			uart_irq_tx_disable(hci_uart_dev);
 			return;
@@ -230,7 +253,7 @@ static void tx_thread(void *p1, void *p2, void *p3)
 		int err;
 
 		/* Wait until a buffer is available */
-		buf = net_buf_get(&tx_queue, K_FOREVER);
+		buf = k_fifo_get(&tx_queue, K_FOREVER);
 		/* Pass buffer to the stack */
 		err = bt_send(buf);
 		if (err) {
@@ -250,7 +273,7 @@ static int h4_send(struct net_buf *buf)
 	LOG_DBG("buf %p type %u len %u", buf, bt_buf_get_type(buf),
 		    buf->len);
 
-	net_buf_put(&uart_tx_queue, buf);
+	k_fifo_put(&uart_tx_queue, buf);
 	uart_irq_tx_enable(hci_uart_dev);
 
 	return 0;
@@ -303,13 +326,19 @@ void bt_ctlr_assert_handle(char *file, uint32_t line)
 }
 #endif /* CONFIG_BT_CTLR_ASSERT_HANDLER */
 
-static int hci_uart_init(const struct device *unused)
+static int hci_uart_init(void)
 {
 	LOG_DBG("");
 
-	/* Derived from DT's bt-c2h-uart chosen node */
-	hci_uart_dev = device_get_binding(CONFIG_BT_CTLR_TO_HOST_UART_DEV_NAME);
-	if (!hci_uart_dev) {
+	if (IS_ENABLED(CONFIG_USB_CDC_ACM)) {
+		if (usb_enable(NULL)) {
+			LOG_ERR("Failed to enable USB");
+			return -EINVAL;
+		}
+	}
+
+	if (!device_is_ready(hci_uart_dev)) {
+		LOG_ERR("HCI UART %s is not ready", hci_uart_dev->name);
 		return -EINVAL;
 	}
 
@@ -323,10 +352,9 @@ static int hci_uart_init(const struct device *unused)
 	return 0;
 }
 
-SYS_DEVICE_DEFINE("hci_uart", hci_uart_init, NULL,
-		  APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
+SYS_INIT(hci_uart_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 
-void main(void)
+int main(void)
 {
 	/* incoming events and data from the controller */
 	static K_FIFO_DEFINE(rx_queue);
@@ -375,10 +403,11 @@ void main(void)
 	while (1) {
 		struct net_buf *buf;
 
-		buf = net_buf_get(&rx_queue, K_FOREVER);
+		buf = k_fifo_get(&rx_queue, K_FOREVER);
 		err = h4_send(buf);
 		if (err) {
 			LOG_ERR("Failed to send");
 		}
 	}
+	return 0;
 }

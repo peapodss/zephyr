@@ -7,7 +7,7 @@
 
 from os import path
 
-from runners.core import ZephyrBinaryRunner
+from runners.core import ZephyrBinaryRunner, RunnerCaps
 
 DEFAULT_ARC_GDB_PORT = 3333
 DEFAULT_PROPS_FILE = 'nsim_em.props'
@@ -28,7 +28,10 @@ class NsimBinaryRunner(ZephyrBinaryRunner):
                  gdb_port=DEFAULT_ARC_GDB_PORT,
                  props=DEFAULT_PROPS_FILE):
         super().__init__(cfg)
-        self.gdb_cmd = [cfg.gdb] + (['-tui'] if tui else [])
+        if cfg.gdb is None:
+            self.gdb_cmd = None
+        else:
+            self.gdb_cmd = [cfg.gdb] + (['-tui'] if tui else [])
         self.nsim_cmd = ['nsimdrv']
         self.gdb_port = gdb_port
         self.props = props
@@ -36,6 +39,10 @@ class NsimBinaryRunner(ZephyrBinaryRunner):
     @classmethod
     def name(cls):
         return 'arc-nsim'
+
+    @classmethod
+    def capabilities(cls):
+        return RunnerCaps(commands={'flash', 'debug', 'debugserver', 'attach'})
 
     @classmethod
     def do_add_parser(cls, parser):
@@ -46,9 +53,6 @@ class NsimBinaryRunner(ZephyrBinaryRunner):
 
     @classmethod
     def do_create(cls, cfg, args):
-        if cfg.gdb is None:
-            raise ValueError('--gdb not provided at command line')
-
         return NsimBinaryRunner(
             cfg,
             gdb_port=args.gdb_port,
@@ -73,6 +77,9 @@ class NsimBinaryRunner(ZephyrBinaryRunner):
         self.check_call(cmd)
 
     def do_debug(self, **kwargs):
+        if self.gdb_cmd is None:
+            raise ValueError('Cannot debug; gdb is missing')
+
         config = kwargs['nsim-cfg']
 
         server_cmd = (self.nsim_cmd + ['-gdb',

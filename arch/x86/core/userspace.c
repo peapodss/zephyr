@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <sys/speculation.h>
-#include <syscall_handler.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/speculation.h>
+#include <zephyr/internal/syscall_handler.h>
 #include <kernel_arch_func.h>
 #include <ksched.h>
 #include <x86_mmu.h>
+
+BUILD_ASSERT((CONFIG_PRIVILEGED_STACK_SIZE > 0) &&
+	     (CONFIG_PRIVILEGED_STACK_SIZE % CONFIG_MMU_PAGE_SIZE) == 0);
+
+#ifdef CONFIG_DEMAND_PAGING
+#include <zephyr/kernel/mm/demand_paging.h>
+#endif
 
 #ifndef CONFIG_X86_KPTI
 /* Update the to the incoming thread's page table, and update the location of
@@ -23,10 +30,11 @@
  * we go through z_x86_trampoline_to_user.
  *
  * We don't need to update the privilege mode initial stack pointer either,
- * privilege elevation always lands on the trampoline stack and the irq/sycall
+ * privilege elevation always lands on the trampoline stack and the irq/syscall
  * code has to manually transition off of it to the appropriate stack after
  * switching page tables.
  */
+__pinned_func
 void z_x86_swap_update_page_tables(struct k_thread *incoming)
 {
 #ifndef CONFIG_X86_64
@@ -61,8 +69,13 @@ void z_x86_swap_update_page_tables(struct k_thread *incoming)
 void *z_x86_userspace_prepare_thread(struct k_thread *thread)
 {
 	void *initial_entry;
+
 	struct z_x86_thread_stack_header *header =
+#ifdef CONFIG_THREAD_STACK_MEM_MAPPED
+		(struct z_x86_thread_stack_header *)thread->stack_info.mapped.addr;
+#else
 		(struct z_x86_thread_stack_header *)thread->stack_obj;
+#endif /* CONFIG_THREAD_STACK_MEM_MAPPED */
 
 	thread->arch.psp =
 		header->privilege_stack + sizeof(header->privilege_stack);
@@ -87,7 +100,7 @@ void *z_x86_userspace_prepare_thread(struct k_thread *thread)
 FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
 					void *p1, void *p2, void *p3)
 {
-	uint32_t stack_end;
+	size_t stack_end;
 
 	/* Transition will reset stack pointer to initial, discarding
 	 * any old context since this is a one-way operation
@@ -95,6 +108,51 @@ FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
 	stack_end = Z_STACK_PTR_ALIGN(_current->stack_info.start +
 				      _current->stack_info.size -
 				      _current->stack_info.delta);
+
+#ifdef CONFIG_X86_64
+	/* x86_64 SysV ABI requires 16 byte stack alignment, which
+	 * means that on entry to a C function (which follows a CALL
+	 * that pushes 8 bytes) the stack must be MISALIGNED by
+	 * exactly 8 bytes.
+	 */
+	stack_end -= 8;
+#endif
+
+#if defined(CONFIG_DEMAND_PAGING) && \
+	!defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)
+	/* If generic section is not present at boot,
+	 * the thread stack may not be in physical memory.
+	 * Unconditionally page in the stack instead of
+	 * relying on page fault to speed up a little bit
+	 * on starting the thread.
+	 *
+	 * Note that this also needs to page in the reserved
+	 * portion of the stack (which is usually the page just
+	 * before the beginning of stack in
+	 * _current->stack_info.start.
+	 */
+	uintptr_t stack_start;
+	size_t stack_size;
+	uintptr_t stack_aligned_start;
+	size_t stack_aligned_size;
+
+	stack_start = POINTER_TO_UINT(_current->stack_obj);
+	stack_size = K_THREAD_STACK_LEN(_current->stack_info.size);
+
+#if defined(CONFIG_X86_STACK_PROTECTION)
+	/* With hardware stack protection, the first page of stack
+	 * is a guard page. So need to skip it.
+	 */
+	stack_start += CONFIG_MMU_PAGE_SIZE;
+	stack_size -= CONFIG_MMU_PAGE_SIZE;
+#endif
+
+	(void)k_mem_region_align(&stack_aligned_start, &stack_aligned_size,
+				 stack_start, stack_size,
+				 CONFIG_MMU_PAGE_SIZE);
+	k_mem_page_in(UINT_TO_POINTER(stack_aligned_start),
+		      stack_aligned_size);
+#endif
 
 	z_x86_userspace_enter(user_entry, p1, p2, p3, stack_end,
 			      _current->stack_info.start);

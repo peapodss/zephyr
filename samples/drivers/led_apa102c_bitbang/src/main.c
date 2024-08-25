@@ -16,20 +16,18 @@
  * Protect your eyes and do not look directly into those LEDs.
  */
 
-#include <zephyr.h>
+#include <zephyr/kernel.h>
 
-#include <sys/printk.h>
+#include <zephyr/sys/printk.h>
 
-#include <device.h>
-#include <drivers/gpio.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 /* in millisecond */
 #define SLEEPTIME	K_MSEC(250)
 
 #define GPIO_DATA_PIN	16
 #define GPIO_CLK_PIN	19
 #define GPIO_NAME	"GPIO_"
-
-#define GPIO_DRV_NAME	DT_LABEL(DT_ALIAS(gpio_0))
 
 #define APA102C_START_FRAME	0x00000000
 #define APA102C_END_FRAME	0xFFFFFFFF
@@ -65,17 +63,17 @@ void send_rgb(const struct device *gpio_dev, uint32_t rgb)
 	}
 }
 
-void main(void)
+int main(void)
 {
 	const struct device *gpio_dev;
 	int ret;
 	int idx = 0;
 	int leds = 0;
 
-	gpio_dev = device_get_binding(GPIO_DRV_NAME);
-	if (!gpio_dev) {
-		printk("Cannot find %s!\n", GPIO_DRV_NAME);
-		return;
+	gpio_dev = DEVICE_DT_GET(DT_ALIAS(gpio_0));
+	if (!device_is_ready(gpio_dev)) {
+		printk("GPIO device %s is not ready!\n", gpio_dev->name);
+		return 0;
 	}
 
 	/* Setup GPIO output */
@@ -109,4 +107,5 @@ void main(void)
 
 		k_sleep(SLEEPTIME);
 	}
+	return 0;
 }

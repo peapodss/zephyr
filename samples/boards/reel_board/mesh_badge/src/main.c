@@ -4,22 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr.h>
-#include <sys/printk.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
 
 #include <string.h>
 
-#include <settings/settings.h>
+#include <zephyr/settings/settings.h>
 
-#include <bluetooth/bluetooth.h>
-#include <bluetooth/gatt.h>
-#include <drivers/sensor.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/bluetooth/hci.h>
 
 #include "mesh.h"
 #include "board.h"
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
+};
+
+static const struct bt_data sd[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
 static ssize_t read_name(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -59,13 +64,11 @@ static ssize_t write_name(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return len;
 }
 
-static struct bt_uuid_128 name_uuid = BT_UUID_INIT_128(
-	0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
+static const struct bt_uuid_128 name_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef0));
 
-static struct bt_uuid_128 name_enc_uuid = BT_UUID_INIT_128(
-	0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
+static const struct bt_uuid_128 name_enc_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef1));
 
 #define CPF_FORMAT_UTF8 0x19
 
@@ -115,6 +118,9 @@ static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 const struct bt_conn_auth_cb auth_cb = {
 	.passkey_display = passkey_display,
 	.cancel = passkey_cancel,
+};
+
+static struct bt_conn_auth_info_cb auth_info_cb = {
 	.pairing_complete = pairing_complete,
 	.pairing_failed = pairing_failed,
 };
@@ -132,7 +138,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	printk("Disconnected (reason 0x%02x)\n", reason);
+	printk("Disconnected, reason 0x%02x %s\n", reason, bt_hci_err_to_str(reason));
 
 	if (strcmp(CONFIG_BT_DEVICE_NAME, bt_get_name()) &&
 	    !mesh_is_initialized()) {
@@ -144,7 +150,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	}
 }
 
-static struct bt_conn_cb conn_cb = {
+BT_CONN_CB_DEFINE(conn_cb) = {
 	.connected = connected,
 	.disconnected = disconnected,
 };
@@ -166,8 +172,8 @@ static void bt_ready(int err)
 
 	printk("Mesh initialized\n");
 
-	bt_conn_cb_register(&conn_cb);
 	bt_conn_auth_cb_register(&auth_cb);
+	bt_conn_auth_info_cb_register(&auth_info_cb);
 
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
 		settings_load();
@@ -175,8 +181,8 @@ static void bt_ready(int err)
 
 	if (!mesh_is_initialized()) {
 		/* Start advertising */
-		err = bt_le_adv_start(BT_LE_ADV_CONN_NAME,
-				      ad, ARRAY_SIZE(ad), NULL, 0);
+		err = bt_le_adv_start(BT_LE_ADV_CONN_ONE_TIME, ad, ARRAY_SIZE(ad), sd,
+				      ARRAY_SIZE(sd));
 		if (err) {
 			printk("Advertising failed to start (err %d)\n", err);
 			return;
@@ -190,14 +196,14 @@ static void bt_ready(int err)
 	printk("Board started\n");
 }
 
-void main(void)
+int main(void)
 {
 	int err;
 
 	err = board_init();
 	if (err) {
 		printk("board init failed (err %d)\n", err);
-		return;
+		return 0;
 	}
 
 	printk("Starting Board Demo\n");
@@ -206,12 +212,13 @@ void main(void)
 	err = bt_enable(bt_ready);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
-		return;
+		return 0;
 	}
 
 	err = periphs_init();
 	if (err) {
-		printk("perpherals initialization failed (err %d)\n", err);
-		return;
+		printk("peripherals initialization failed (err %d)\n", err);
+		return 0;
 	}
+	return 0;
 }

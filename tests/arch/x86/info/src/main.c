@@ -3,7 +3,7 @@
  * Copyright (c) 2019 Intel Corp.
  */
 
-#include <zephyr.h>
+#include <zephyr/kernel.h>
 #include "info.h"
 
 __weak void multiboot(void)
@@ -11,12 +11,17 @@ __weak void multiboot(void)
 	printk("MULTIBOOT: Not supported in this build.\n\n");
 }
 
+__weak void memmap(void)
+{
+	printk("MEMMAP: Not supported in this build.\n\n");
+}
+
 __weak void acpi(void)
 {
 	printk("ACPI: Not supported in this build.\n\n");
 }
 
-void main(void)
+int main(void)
 {
 	printk("\n\ninfo: the Zephyr x86 platform information tool\n\n");
 
@@ -26,4 +31,5 @@ void main(void)
 	timer();
 
 	printk("info: complete\n");
+	return 0;
 }

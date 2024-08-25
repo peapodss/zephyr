@@ -4,9 +4,7 @@
 
 '''Runner for NIOS II, based on quartus-flash.py and GDB.'''
 
-import os
-
-from runners.core import ZephyrBinaryRunner, NetworkPortHelper
+from runners.core import ZephyrBinaryRunner, NetworkPortHelper, RunnerCaps
 
 
 class Nios2BinaryRunner(ZephyrBinaryRunner):
@@ -32,11 +30,15 @@ class Nios2BinaryRunner(ZephyrBinaryRunner):
         return 'nios2'
 
     @classmethod
+    def capabilities(cls):
+        return RunnerCaps(commands={'flash', 'debug', 'debugserver', 'attach'})
+
+    @classmethod
     def do_add_parser(cls, parser):
         # TODO merge quartus-flash.py script into this file.
         parser.add_argument('--quartus-flash', required=True)
         parser.add_argument('--cpu-sof', required=True,
-                            help='path to the the CPU .sof data')
+                            help='path to the CPU .sof data')
         parser.add_argument('--tui', default=False, action='store_true',
                             help='if given, GDB uses -tui')
 
@@ -58,10 +60,7 @@ class Nios2BinaryRunner(ZephyrBinaryRunner):
             raise ValueError('Cannot flash; --quartus-flash not given.')
         if self.cpu_sof is None:
             raise ValueError('Cannot flash; --cpu-sof not given.')
-        if not os.path.isfile(self.hex_name):
-            raise ValueError('Cannot flash; hex file ({}) does not exist. '.
-                             format(self.hex_name) +
-                             'Try enabling CONFIG_BUILD_OUTPUT_HEX.')
+        self.ensure_output('hex')
 
         self.logger.info('Flashing file: {}'.format(self.hex_name))
         cmd = [self.quartus_py,

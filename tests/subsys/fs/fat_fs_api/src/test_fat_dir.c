@@ -65,6 +65,8 @@ static int test_lsdir(const char *path)
 
 	TC_PRINT("\nlsdir tests:\n");
 
+	fs_dir_t_init(&dirp);
+
 	/* Verify fs_opendir() */
 	res = fs_opendir(&dirp, path);
 	if (res) {
@@ -104,6 +106,8 @@ static int test_rmdir(void)
 	char file_path[80 + MAX_FILE_NAME];
 
 	TC_PRINT("\nrmdir tests:\n");
+
+	fs_dir_t_init(&dirp);
 
 	if (!check_file_dir_exists(TEST_DIR)) {
 		TC_PRINT("%s doesn't exist\n", TEST_DIR);
@@ -153,9 +157,9 @@ static int test_rmdir(void)
 
 void test_fat_dir(void)
 {
-	zassert_true(test_mkdir() == TC_PASS, NULL);
-	zassert_true(test_lsdir(FATFS_MNTP) == TC_PASS, NULL);
-	zassert_true(test_lsdir(TEST_DIR) == TC_PASS, NULL);
-	zassert_true(test_rmdir() == TC_PASS, NULL);
-	zassert_true(test_lsdir(FATFS_MNTP) == TC_PASS, NULL);
+	zassert_true(test_mkdir() == TC_PASS);
+	zassert_true(test_lsdir(FATFS_MNTP) == TC_PASS);
+	zassert_true(test_lsdir(TEST_DIR) == TC_PASS);
+	zassert_true(test_rmdir() == TC_PASS);
+	zassert_true(test_lsdir(FATFS_MNTP) == TC_PASS);
 }

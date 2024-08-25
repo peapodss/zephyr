@@ -7,15 +7,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(net_echo_server_sample, LOG_LEVEL_DBG);
 
-#include <zephyr.h>
+#include <zephyr/kernel.h>
 #include <errno.h>
 #include <stdio.h>
 
-#include <net/socket.h>
-#include <net/tls_credentials.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/net/tls_credentials.h>
 
 #include "common.h"
 #include "certificate.h"
@@ -36,6 +36,7 @@ K_THREAD_DEFINE(udp6_thread_id, STACK_SIZE,
 static int start_udp_proto(struct data *data, struct sockaddr *bind_addr,
 			   socklen_t bind_addrlen)
 {
+	int optval;
 	int ret;
 
 #if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
@@ -77,11 +78,21 @@ static int start_udp_proto(struct data *data, struct sockaddr *bind_addr,
 	}
 #endif
 
-#if defined(CONFIG_NET_CONTEXT_TIMESTAMP)
-	bool val = 1;
+	if (bind_addr->sa_family == AF_INET6) {
+		/* Prefer IPv6 temporary addresses */
+		optval = IPV6_PREFER_SRC_PUBLIC;
+		(void)setsockopt(data->tcp.sock, IPPROTO_IPV6,
+				 IPV6_ADDR_PREFERENCES,
+				 &optval, sizeof(optval));
 
-	setsockopt(data->udp.sock, SOL_SOCKET, SO_TIMESTAMPING, &val, sizeof(val));
-#endif
+		/*
+		 * Bind only to IPv6 without mapping to IPv4, since we bind to
+		 * IPv4 using another socket
+		 */
+		optval = 1;
+		(void)setsockopt(data->tcp.sock, IPPROTO_IPV6, IPV6_V6ONLY,
+				 &optval, sizeof(optval));
+	}
 
 	ret = bind(data->udp.sock, bind_addr, bind_addrlen);
 	if (ret < 0) {
@@ -156,9 +167,6 @@ static void process_udp4(void)
 		return;
 	}
 
-	k_delayed_work_submit(&conf.ipv4.udp.stats_print,
-			      K_SECONDS(STATS_TIMER));
-
 	while (ret == 0) {
 		ret = process_udp(&conf.ipv4);
 		if (ret < 0) {
@@ -183,9 +191,6 @@ static void process_udp6(void)
 		return;
 	}
 
-	k_delayed_work_submit(&conf.ipv6.udp.stats_print,
-			      K_SECONDS(STATS_TIMER));
-
 	while (ret == 0) {
 		ret = process_udp(&conf.ipv6);
 		if (ret < 0) {
@@ -196,7 +201,8 @@ static void process_udp6(void)
 
 static void print_stats(struct k_work *work)
 {
-	struct data *data = CONTAINER_OF(work, struct data, udp.stats_print);
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct data *data = CONTAINER_OF(dwork, struct data, udp.stats_print);
 	int total_received = atomic_get(&data->udp.bytes_received);
 
 	if (total_received) {
@@ -211,7 +217,7 @@ static void print_stats(struct k_work *work)
 		atomic_set(&data->udp.bytes_received, 0);
 	}
 
-	k_delayed_work_submit(&data->udp.stats_print, K_SECONDS(STATS_TIMER));
+	k_work_reschedule(&data->udp.stats_print, K_SECONDS(STATS_TIMER));
 }
 
 void start_udp(void)
@@ -221,9 +227,11 @@ void start_udp(void)
 		k_mem_domain_add_thread(&app_domain, udp6_thread_id);
 #endif
 
-		k_delayed_work_init(&conf.ipv6.udp.stats_print, print_stats);
+		k_work_init_delayable(&conf.ipv6.udp.stats_print, print_stats);
 		k_thread_name_set(udp6_thread_id, "udp6");
 		k_thread_start(udp6_thread_id);
+		k_work_reschedule(&conf.ipv6.udp.stats_print,
+				  K_SECONDS(STATS_TIMER));
 	}
 
 	if (IS_ENABLED(CONFIG_NET_IPV4)) {
@@ -231,9 +239,11 @@ void start_udp(void)
 		k_mem_domain_add_thread(&app_domain, udp4_thread_id);
 #endif
 
-		k_delayed_work_init(&conf.ipv4.udp.stats_print, print_stats);
+		k_work_init_delayable(&conf.ipv4.udp.stats_print, print_stats);
 		k_thread_name_set(udp4_thread_id, "udp4");
 		k_thread_start(udp4_thread_id);
+		k_work_reschedule(&conf.ipv4.udp.stats_print,
+				  K_SECONDS(STATS_TIMER));
 	}
 }
 

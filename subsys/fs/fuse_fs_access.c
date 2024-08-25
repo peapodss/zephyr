@@ -6,6 +6,9 @@
 
 #define FUSE_USE_VERSION 26
 
+#undef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+
 #include <fuse.h>
 #include <libgen.h>
 #include <linux/limits.h>
@@ -15,11 +18,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 
-#include <zephyr.h>
-#include <fs/fs.h>
+#include <zephyr/kernel.h>
+#include <zephyr/fs/fs.h>
 
 #include "cmdline.h"
 #include "soc.h"
@@ -65,8 +69,15 @@ static void release_file_handle(size_t handle)
 static bool is_mount_point(const char *path)
 {
 	char dir_path[PATH_MAX];
+	size_t len;
 
-	sprintf(dir_path, "%s", path);
+	len = strlen(path);
+	if (len >=  sizeof(dir_path)) {
+		return false;
+	}
+
+	memcpy(dir_path, path, len);
+	dir_path[len] = '\0';
 	return strcmp(dirname(dir_path), "/") == 0;
 }
 
@@ -169,14 +180,22 @@ static int fuse_fs_access_readdir(const char *path, void *buf,
 		return fuse_fs_access_readmount(buf, filler);
 	}
 
+	fs_dir_t_init(&dir);
+
 	if (is_mount_point(path)) {
 		/* File system API expects trailing slash for a mount point
 		 * directory but FUSE strips the trailing slashes from
 		 * directory names so add it back.
 		 */
-		char mount_path[PATH_MAX];
+		char mount_path[PATH_MAX] = {0};
+		size_t len = strlen(path);
 
-		sprintf(mount_path, "%s/", path);
+		if (len >= (PATH_MAX - 2)) {
+			return -ENOMEM;
+		}
+
+		memcpy(mount_path, path, len);
+		mount_path[len] = '/';
 		err = fs_opendir(&dir, mount_path);
 	} else {
 		err = fs_opendir(&dir, path);
@@ -345,7 +364,7 @@ static int fuse_fs_access_truncate(const char *path, off_t size)
 	int err;
 	static struct fs_file_t file;
 
-	err = fs_open(&file, path);
+	err = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE);
 	if (err != 0) {
 		return err;
 	}
@@ -468,6 +487,12 @@ static void fuse_fs_access_init(void)
 {
 	int err;
 	struct stat st;
+	size_t i = 0;
+
+	while (i < ARRAY_SIZE(files)) {
+		fs_file_t_init(&files[i]);
+		++i;
+	}
 
 	if (fuse_mountpoint == NULL) {
 		fuse_mountpoint = default_fuse_mountpoint;

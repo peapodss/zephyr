@@ -28,19 +28,22 @@ extern atomic_t hci_state_mask;
 #define HCI_CLASS_ACL_DATA        5 /* Asynchronous Connection Less (general
 				     * data)
 				     */
+#define HCI_CLASS_ISO_DATA        6 /* Isochronous data */
+
 
 void hci_init(struct k_poll_signal *signal_host_buf);
+void hci_recv_fifo_reset(void);
 struct net_buf *hci_cmd_handle(struct net_buf *cmd, void **node_rx);
 void hci_evt_encode(struct node_rx_pdu *node_rx, struct net_buf *buf);
 uint8_t hci_get_class(struct node_rx_pdu *node_rx);
 void hci_disconn_complete_encode(struct pdu_data *pdu_data, uint16_t handle,
 				 struct net_buf *buf);
 void hci_disconn_complete_process(uint16_t handle);
-#if defined(CONFIG_BT_CONN)
+void hci_num_cmplt_encode(struct net_buf *buf, uint16_t handle, uint8_t num);
 int hci_acl_handle(struct net_buf *acl, struct net_buf **evt);
 void hci_acl_encode(struct node_rx_pdu *node_rx, struct net_buf *buf);
-void hci_num_cmplt_encode(struct net_buf *buf, uint16_t handle, uint8_t num);
-#endif
+int hci_iso_handle(struct net_buf *acl, struct net_buf **evt);
+void hci_iso_encode(struct net_buf *buf, uint16_t handle, uint8_t flags);
 int hci_vendor_cmd_handle(uint16_t ocf, struct net_buf *cmd,
 			  struct net_buf **evt);
 uint8_t hci_vendor_read_static_addr(struct bt_hci_vs_static_addr addrs[],

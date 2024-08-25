@@ -10,7 +10,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <net/ppp.h>
+#include <zephyr/net/ppp.h>
+#include <zephyr/sys/iterable_sections.h>
 
 /**
  * FSM flags that control how it operates.
@@ -85,12 +86,12 @@ int ppp_config_info_req(struct ppp_fsm *fsm,
 			void *user_data);
 
 #define PPP_PROTO_GET_NAME(proto_name)		\
-	(ppp_protocol_handler_##proto_name)
+	_CONCAT(ppp_protocol_handler_, proto_name)
 
 #define PPP_PROTOCOL_REGISTER(name, proto, init_func, proto_handler,	\
 			      proto_lower_up, proto_lower_down,		\
 			      proto_open, proto_close)			\
-	static const Z_STRUCT_SECTION_ITERABLE(ppp_protocol_handler,	\
+	static const STRUCT_SECTION_ITERABLE(ppp_protocol_handler,	\
 					PPP_PROTO_GET_NAME(name)) = {	\
 		.protocol = proto,					\
 		.init = init_func,					\
@@ -101,6 +102,7 @@ int ppp_config_info_req(struct ppp_fsm *fsm,
 		.close = proto_close,					\
 	}
 
+void ppp_queue_pkt(struct net_pkt *pkt);
 const char *ppp_phase_str(enum ppp_phase phase);
 const char *ppp_state_str(enum ppp_state state);
 const char *ppp_proto2str(uint16_t proto);

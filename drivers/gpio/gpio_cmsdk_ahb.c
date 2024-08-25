@@ -6,17 +6,18 @@
 
 #define DT_DRV_COMPAT arm_cmsdk_gpio
 
-#include <kernel.h>
+#include <zephyr/kernel.h>
 
-#include <device.h>
+#include <zephyr/device.h>
 #include <errno.h>
-#include <drivers/gpio.h>
-#include <init.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/init.h>
 #include <soc.h>
-#include <drivers/clock_control/arm_clock_control.h>
+#include <zephyr/drivers/clock_control/arm_clock_control.h>
+#include <zephyr/drivers/gpio/gpio_cmsdk_ahb.h>
+#include <zephyr/irq.h>
 
-#include "gpio_cmsdk_ahb.h"
-#include "gpio_utils.h"
+#include <zephyr/drivers/gpio/gpio_utils.h>
 
 /**
  * @brief GPIO driver for ARM CMSDK AHB GPIO
@@ -178,7 +179,7 @@ static int gpio_cmsdk_ahb_pin_interrupt_configure(const struct device *dev,
 			cfg->port->inttypeclr = BIT(pin);
 		}
 
-		/* Level High or Edge Risising */
+		/* Level High or Edge Rising */
 		if (trig == GPIO_INT_TRIG_HIGH) {
 			cfg->port->intpolset = BIT(pin);
 		} else {
@@ -238,13 +239,16 @@ static int gpio_cmsdk_ahb_init(const struct device *dev)
 
 #ifdef CONFIG_CLOCK_CONTROL
 	/* Enable clock for subsystem */
-	const struct device *clk =
-		device_get_binding(CONFIG_ARM_CLOCK_CONTROL_DEV_NAME);
+	const struct device *const clk = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(0));
+
+	if (!device_is_ready(clk)) {
+		return -ENODEV;
+	}
 
 #ifdef CONFIG_SOC_SERIES_BEETLE
-	clock_control_on(clk, (clock_control_subsys_t *) &cfg->gpio_cc_as);
-	clock_control_off(clk, (clock_control_subsys_t *) &cfg->gpio_cc_ss);
-	clock_control_off(clk, (clock_control_subsys_t *) &cfg->gpio_cc_dss);
+	clock_control_on(clk, (clock_control_subsys_t) &cfg->gpio_cc_as);
+	clock_control_off(clk, (clock_control_subsys_t) &cfg->gpio_cc_ss);
+	clock_control_off(clk, (clock_control_subsys_t) &cfg->gpio_cc_dss);
 #endif /* CONFIG_SOC_SERIES_BEETLE */
 #endif /* CONFIG_CLOCK_CONTROL */
 
@@ -272,12 +276,12 @@ static int gpio_cmsdk_ahb_init(const struct device *dev)
 										\
 	static struct gpio_cmsdk_ahb_dev_data gpio_cmsdk_port_##n##_data;	\
 										\
-	DEVICE_AND_API_INIT(gpio_cmsdk_port_## n,				\
-			    DT_INST_LABEL(n),					\
+	DEVICE_DT_INST_DEFINE(n,						\
 			    gpio_cmsdk_ahb_init,				\
+			    NULL,						\
 			    &gpio_cmsdk_port_##n##_data,			\
 			    &gpio_cmsdk_port_## n ##_config,			\
-			    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,	\
+			    PRE_KERNEL_1, CONFIG_GPIO_INIT_PRIORITY,	\
 			    &gpio_cmsdk_ahb_drv_api_funcs);			\
 										\
 	static void gpio_cmsdk_port_##n##_config_func(const struct device *dev)	\
@@ -285,7 +289,7 @@ static int gpio_cmsdk_ahb_init(const struct device *dev)
 		IRQ_CONNECT(DT_INST_IRQN(n),					\
 			    DT_INST_IRQ(n, priority),				\
 			    gpio_cmsdk_ahb_isr,					\
-			    DEVICE_GET(gpio_cmsdk_port_## n), 0);		\
+			    DEVICE_DT_INST_GET(n), 0);				\
 										\
 		irq_enable(DT_INST_IRQN(n));					\
 	}

@@ -2,67 +2,75 @@
  * Copyright (c) 2017 Jan Van Winkel <jan.van_winkel@dxplore.eu>
  * Copyright (c) 2019 Nordic Semiconductor ASA
  * Copyright (c) 2020 Teslabs Engineering S.L.
- *
+ * Copyright (c) 2021 Krivorot Oleg <krivorot.oleg@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "display_ili9xxx.h"
 
-#include <dt-bindings/display/ili9xxx.h>
-#include <drivers/display.h>
-#include <drivers/spi.h>
-#include <sys/byteorder.h>
+#include <zephyr/dt-bindings/display/ili9xxx.h>
+#include <zephyr/drivers/display.h>
+#include <zephyr/sys/byteorder.h>
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(display_ili9xxx, CONFIG_DISPLAY_LOG_LEVEL);
 
 struct ili9xxx_data {
-	const struct device *reset_gpio;
-	const struct device *command_data_gpio;
-	const struct device *spi_dev;
-	struct spi_config spi_config;
-	struct spi_cs_control cs_ctrl;
 	uint8_t bytes_per_pixel;
 	enum display_pixel_format pixel_format;
 	enum display_orientation orientation;
 };
 
+#ifdef CONFIG_ILI9XXX_READ
+
+/* We set this LUT directly when reads are enabled,
+ * so that we can be sure the bitshift to convert GRAM data back
+ * to RGB565 will result in correct data
+ */
+const uint8_t ili9xxx_rgb_lut[] = {
+	0, 2, 4, 6,
+	8, 10, 12, 14,
+	16, 18, 20, 22,
+	24, 26, 28, 30,
+	32, 34, 36, 38,
+	40, 42, 44, 46,
+	48, 50, 52, 54,
+	56, 58, 60, 62,
+	0, 1, 2, 3,
+	4, 5, 6, 7,
+	8, 9, 10, 11,
+	12, 13, 14, 15,
+	16, 17, 18, 19,
+	20, 21, 22, 23,
+	24, 25, 26, 27,
+	28, 29, 30, 31,
+	32, 33, 34, 35,
+	36, 37, 38, 39,
+	40, 41, 42, 43,
+	44, 45, 46, 47,
+	48, 49, 50, 51,
+	52, 53, 54, 55,
+	56, 57, 58, 59,
+	60, 61, 62, 63,
+	0, 2, 4, 6,
+	8, 10, 12, 14,
+	16, 18, 20, 22,
+	24, 26, 28, 30,
+	32, 34, 36, 38,
+	40, 42, 44, 46,
+	48, 50, 52, 54,
+	56, 58, 60, 62
+};
+
+#endif
+
 int ili9xxx_transmit(const struct device *dev, uint8_t cmd, const void *tx_data,
 		     size_t tx_len)
 {
-	const struct ili9xxx_config *config =
-		(struct ili9xxx_config *)dev->config;
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	const struct ili9xxx_config *config = dev->config;
 
-	int r;
-	struct spi_buf tx_buf;
-	struct spi_buf_set tx_bufs = { .buffers = &tx_buf, .count = 1U };
-
-	/* send command */
-	tx_buf.buf = &cmd;
-	tx_buf.len = 1U;
-
-	gpio_pin_set(data->command_data_gpio, config->cmd_data_pin,
-		     ILI9XXX_CMD);
-	r = spi_write(data->spi_dev, &data->spi_config, &tx_bufs);
-	if (r < 0) {
-		return r;
-	}
-
-	/* send data (if any) */
-	if (tx_data != NULL) {
-		tx_buf.buf = (void *)tx_data;
-		tx_buf.len = tx_len;
-
-		gpio_pin_set(data->command_data_gpio, config->cmd_data_pin,
-			     ILI9XXX_DATA);
-		r = spi_write(data->spi_dev, &data->spi_config, &tx_bufs);
-		if (r < 0) {
-			return r;
-		}
-	}
-
-	return 0;
+	return mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
+				      cmd, tx_data, tx_len);
 }
 
 static int ili9xxx_exit_sleep(const struct device *dev)
@@ -81,18 +89,11 @@ static int ili9xxx_exit_sleep(const struct device *dev)
 
 static void ili9xxx_hw_reset(const struct device *dev)
 {
-	const struct ili9xxx_config *config =
-		(struct ili9xxx_config *)dev->config;
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	const struct ili9xxx_config *config = dev->config;
 
-	if (data->reset_gpio == NULL) {
+	if (mipi_dbi_reset(config->mipi_dev, ILI9XXX_RESET_PULSE_TIME) < 0) {
 		return;
-	}
-
-	gpio_pin_set(data->reset_gpio, config->reset_pin, 1);
-	k_sleep(K_MSEC(ILI9XXX_RESET_PULSE_TIME));
-	gpio_pin_set(data->reset_gpio, config->reset_pin, 0);
-
+	};
 	k_sleep(K_MSEC(ILI9XXX_RESET_WAIT_TIME));
 }
 
@@ -125,12 +126,12 @@ static int ili9xxx_write(const struct device *dev, const uint16_t x,
 			 const struct display_buffer_descriptor *desc,
 			 const void *buf)
 {
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	const struct ili9xxx_config *config = dev->config;
+	struct ili9xxx_data *data = dev->data;
+	struct display_buffer_descriptor mipi_desc;
 
 	int r;
 	const uint8_t *write_data_start = (const uint8_t *)buf;
-	struct spi_buf tx_buf;
-	struct spi_buf_set tx_bufs;
 	uint16_t write_cnt;
 	uint16_t nbr_of_writes;
 	uint16_t write_h;
@@ -150,26 +151,30 @@ static int ili9xxx_write(const struct device *dev, const uint16_t x,
 	if (desc->pitch > desc->width) {
 		write_h = 1U;
 		nbr_of_writes = desc->height;
+		mipi_desc.height = 1;
+		mipi_desc.buf_size = desc->pitch * data->bytes_per_pixel;
 	} else {
 		write_h = desc->height;
+		mipi_desc.height = desc->height;
+		mipi_desc.buf_size = desc->width * data->bytes_per_pixel * write_h;
 		nbr_of_writes = 1U;
 	}
 
-	r = ili9xxx_transmit(dev, ILI9XXX_RAMWR, write_data_start,
-			     desc->width * data->bytes_per_pixel * write_h);
+	mipi_desc.width = desc->width;
+	/* Per MIPI API, pitch must always match width */
+	mipi_desc.pitch = desc->width;
+
+	r = ili9xxx_transmit(dev, ILI9XXX_RAMWR, NULL, 0);
 	if (r < 0) {
 		return r;
 	}
 
-	tx_bufs.buffers = &tx_buf;
-	tx_bufs.count = 1;
-
-	write_data_start += desc->pitch * data->bytes_per_pixel;
-	for (write_cnt = 1U; write_cnt < nbr_of_writes; ++write_cnt) {
-		tx_buf.buf = (void *)write_data_start;
-		tx_buf.len = desc->width * data->bytes_per_pixel * write_h;
-
-		r = spi_write(data->spi_dev, &data->spi_config, &tx_bufs);
+	for (write_cnt = 0U; write_cnt < nbr_of_writes; ++write_cnt) {
+		r = mipi_dbi_write_display(config->mipi_dev,
+					   &config->dbi_config,
+					   write_data_start,
+					   &mipi_desc,
+					   data->pixel_format);
 		if (r < 0) {
 			return r;
 		}
@@ -180,19 +185,92 @@ static int ili9xxx_write(const struct device *dev, const uint16_t x,
 	return 0;
 }
 
+#ifdef CONFIG_ILI9XXX_READ
+
 static int ili9xxx_read(const struct device *dev, const uint16_t x,
 			const uint16_t y,
 			const struct display_buffer_descriptor *desc, void *buf)
 {
-	LOG_ERR("Reading not supported");
-	return -ENOTSUP;
+	const struct ili9xxx_config *config = dev->config;
+	struct ili9xxx_data *data = dev->data;
+	struct display_buffer_descriptor mipi_desc;
+	int r;
+	uint32_t gram_data, nbr_of_reads;
+	uint16_t *read_data_start = (uint16_t *)buf;
+
+	if (data->pixel_format != PIXEL_FORMAT_RGB_565) {
+		/* Only RGB565 can be supported, see note below */
+		return -ENOTSUP;
+	}
+
+	__ASSERT(desc->width <= desc->pitch, "Pitch is smaller than width");
+	__ASSERT((desc->pitch * data->bytes_per_pixel * desc->height) <=
+			 desc->buf_size,
+		 "Output buffer to small");
+
+	LOG_DBG("Reading %dx%d (w,h) @ %dx%d (x,y)", desc->width, desc->height,
+		x, y);
+
+	r = ili9xxx_set_mem_area(dev, x, y, desc->width, desc->height);
+	if (r < 0) {
+		return r;
+	}
+
+	/*
+	 * ILI9XXX stores all pixel data in graphics ram (GRAM) as 18 bit
+	 * values. When using RGB565 pixel format, pixels are converted to
+	 * 18 bit values via a lookup table. When using RGB888 format, the
+	 * lower 2 bits of each pixel are simply dropped. When reading pixels,
+	 * the response format will always look like so:
+	 * | R[5:0] | x | x | G[5:0] | x | x | B[5:0] | x | x |
+	 * Where x represents "don't care". The internal format of the
+	 * ILI9XXX graphics RAM results in the following restrictions:
+	 * - RGB888 mode can't be supported.
+	 * - we can only read one pixel at once (since we need to do
+	 *   byte manipulation on the output)
+	 */
+
+	/* Setup MIPI descriptor to read 3 bytes (one pixel in GRAM) */
+	mipi_desc.width = 1;
+	mipi_desc.height = 1;
+	/* Per MIPI API, pitch must always match width */
+	mipi_desc.pitch = 1;
+
+	nbr_of_reads = desc->width * desc->height;
+
+	/* Initial read command should consist of RAMRD command, plus
+	 * 8 dummy clock cycles
+	 */
+	uint8_t cmd[] = {ILI9XXX_RAMRD, 0xFF};
+
+	for (uint32_t read_cnt = 0; read_cnt < nbr_of_reads; read_cnt++) {
+		r = mipi_dbi_command_read(config->mipi_dev,
+					  &config->dbi_config,
+					  cmd, sizeof(cmd),
+					  (uint8_t *)&gram_data, 3);
+		if (r < 0) {
+			return r;
+		}
+
+		/* Bitshift the graphics RAM data to RGB565.
+		 * For more details on the formatting of this data,
+		 * see "Read data through 4-line SPI mode" diagram
+		 * on page 64 of datasheet.
+		 */
+		read_data_start[read_cnt] =
+			((gram_data & 0xF80000) >> 11) | /* Blue */
+			((gram_data & 0x1C00) << 3) |  /* Green */
+			((gram_data & 0xE000) >> 13) |  /* Green */
+			(gram_data & 0xF8); /* Red */
+
+		/* After first read, we should use read memory continue command */
+		cmd[0] = ILI9XXX_RAMRD_CONT;
+	}
+
+	return 0;
 }
 
-static void *ili9xxx_get_framebuffer(const struct device *dev)
-{
-	LOG_ERR("Direct framebuffer access not supported");
-	return NULL;
-}
+#endif
 
 static int ili9xxx_display_blanking_off(const struct device *dev)
 {
@@ -206,25 +284,11 @@ static int ili9xxx_display_blanking_on(const struct device *dev)
 	return ili9xxx_transmit(dev, ILI9XXX_DISPOFF, NULL, 0);
 }
 
-static int ili9xxx_set_brightness(const struct device *dev,
-				  const uint8_t brightness)
-{
-	LOG_ERR("Set brightness not implemented");
-	return -ENOTSUP;
-}
-
-static int ili9xxx_set_contrast(const struct device *dev,
-				const uint8_t contrast)
-{
-	LOG_ERR("Set contrast not supported");
-	return -ENOTSUP;
-}
-
 static int
 ili9xxx_set_pixel_format(const struct device *dev,
 			 const enum display_pixel_format pixel_format)
 {
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	struct ili9xxx_data *data = dev->data;
 
 	int r;
 	uint8_t tx_data;
@@ -255,20 +319,32 @@ ili9xxx_set_pixel_format(const struct device *dev,
 static int ili9xxx_set_orientation(const struct device *dev,
 				   const enum display_orientation orientation)
 {
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	const struct ili9xxx_config *config = dev->config;
+	struct ili9xxx_data *data = dev->data;
 
 	int r;
 	uint8_t tx_data = ILI9XXX_MADCTL_BGR;
-
-	if (orientation == DISPLAY_ORIENTATION_NORMAL) {
-		tx_data |= ILI9XXX_MADCTL_MX;
-	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_90) {
-		tx_data |= ILI9XXX_MADCTL_MV;
-	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_180) {
-		tx_data |= ILI9XXX_MADCTL_MY;
-	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_270) {
-		tx_data |= ILI9XXX_MADCTL_MV | ILI9XXX_MADCTL_MX |
-			   ILI9XXX_MADCTL_MY;
+	if (config->quirks->cmd_set == CMD_SET_1) {
+		if (orientation == DISPLAY_ORIENTATION_NORMAL) {
+			tx_data |= ILI9XXX_MADCTL_MX;
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_90) {
+			tx_data |= ILI9XXX_MADCTL_MV;
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_180) {
+			tx_data |= ILI9XXX_MADCTL_MY;
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_270) {
+			tx_data |= ILI9XXX_MADCTL_MV | ILI9XXX_MADCTL_MX |
+				   ILI9XXX_MADCTL_MY;
+		}
+	} else if (config->quirks->cmd_set == CMD_SET_2) {
+		if (orientation == DISPLAY_ORIENTATION_NORMAL) {
+			/* Do nothing */
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_90) {
+			tx_data |= ILI9XXX_MADCTL_MV | ILI9XXX_MADCTL_MY;
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_180) {
+			tx_data |= ILI9XXX_MADCTL_MY | ILI9XXX_MADCTL_MX;
+		} else if (orientation == DISPLAY_ORIENTATION_ROTATED_270) {
+			tx_data |= ILI9XXX_MADCTL_MV | ILI9XXX_MADCTL_MX;
+		}
 	}
 
 	r = ili9xxx_transmit(dev, ILI9XXX_MADCTL, &tx_data, 1U);
@@ -284,9 +360,8 @@ static int ili9xxx_set_orientation(const struct device *dev,
 static void ili9xxx_get_capabilities(const struct device *dev,
 				     struct display_capabilities *capabilities)
 {
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
-	const struct ili9xxx_config *config =
-		(struct ili9xxx_config *)dev->config;
+	struct ili9xxx_data *data = dev->data;
+	const struct ili9xxx_config *config = dev->config;
 
 	memset(capabilities, 0, sizeof(struct display_capabilities));
 
@@ -308,8 +383,7 @@ static void ili9xxx_get_capabilities(const struct device *dev,
 
 static int ili9xxx_configure(const struct device *dev)
 {
-	const struct ili9xxx_config *config =
-		(struct ili9xxx_config *)dev->config;
+	const struct ili9xxx_config *config = dev->config;
 
 	int r;
 	enum display_pixel_format pixel_format;
@@ -343,6 +417,13 @@ static int ili9xxx_configure(const struct device *dev)
 		return r;
 	}
 
+	if (config->inversion) {
+		r = ili9xxx_transmit(dev, ILI9XXX_DINVON, NULL, 0U);
+		if (r < 0) {
+			return r;
+		}
+	}
+
 	r = config->regs_init_fn(dev);
 	if (r < 0) {
 		return r;
@@ -353,56 +434,31 @@ static int ili9xxx_configure(const struct device *dev)
 
 static int ili9xxx_init(const struct device *dev)
 {
-	const struct ili9xxx_config *config =
-		(struct ili9xxx_config *)dev->config;
-	struct ili9xxx_data *data = (struct ili9xxx_data *)dev->data;
+	const struct ili9xxx_config *config = dev->config;
 
 	int r;
 
-	data->spi_dev = device_get_binding(config->spi_name);
-	if (data->spi_dev == NULL) {
-		LOG_ERR("Could not get SPI device %s", config->spi_name);
+	if (!device_is_ready(config->mipi_dev)) {
+		LOG_ERR("MIPI DBI device is not ready");
 		return -ENODEV;
-	}
-
-	data->spi_config.frequency = config->spi_max_freq;
-	data->spi_config.operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8U);
-	data->spi_config.slave = config->spi_addr;
-
-	data->cs_ctrl.gpio_dev = device_get_binding(config->spi_cs_label);
-	if (data->cs_ctrl.gpio_dev != NULL) {
-		data->cs_ctrl.gpio_pin = config->spi_cs_pin;
-		data->cs_ctrl.gpio_dt_flags = config->spi_cs_flags;
-		data->cs_ctrl.delay = 0U;
-		data->spi_config.cs = &data->cs_ctrl;
-	}
-
-	data->command_data_gpio = device_get_binding(config->cmd_data_label);
-	if (data->command_data_gpio == NULL) {
-		LOG_ERR("Could not get command/data GPIO port %s",
-			config->cmd_data_label);
-		return -ENODEV;
-	}
-
-	r = gpio_pin_configure(data->command_data_gpio, config->cmd_data_pin,
-			       GPIO_OUTPUT | config->cmd_data_flags);
-	if (r < 0) {
-		LOG_ERR("Could not configure command/data GPIO (%d)", r);
-		return r;
-	}
-
-	data->reset_gpio = device_get_binding(config->reset_label);
-	if (data->reset_gpio != NULL) {
-		r = gpio_pin_configure(data->reset_gpio, config->reset_pin,
-				       GPIO_OUTPUT_INACTIVE |
-					       config->reset_flags);
-		if (r < 0) {
-			LOG_ERR("Could not configure reset GPIO (%d)", r);
-			return r;
-		}
 	}
 
 	ili9xxx_hw_reset(dev);
+
+	r = ili9xxx_transmit(dev, ILI9XXX_SWRESET, NULL, 0);
+	if (r < 0) {
+		LOG_ERR("Error transmit command Software Reset (%d)", r);
+		return r;
+	}
+
+#ifdef CONFIG_ILI9XXX_READ
+	/* Set RGB LUT table to enable display read API */
+	ili9xxx_transmit(dev, ILI9XXX_RGBSET, ili9xxx_rgb_lut, sizeof(ili9xxx_rgb_lut));
+#endif
+
+	k_sleep(K_MSEC(ILI9XXX_RESET_WAIT_TIME));
+
+	ili9xxx_display_blanking_on(dev);
 
 	r = ili9xxx_configure(dev);
 	if (r < 0) {
@@ -423,14 +479,37 @@ static const struct display_driver_api ili9xxx_api = {
 	.blanking_on = ili9xxx_display_blanking_on,
 	.blanking_off = ili9xxx_display_blanking_off,
 	.write = ili9xxx_write,
+#ifdef CONFIG_ILI9XXX_READ
 	.read = ili9xxx_read,
-	.get_framebuffer = ili9xxx_get_framebuffer,
-	.set_brightness = ili9xxx_set_brightness,
-	.set_contrast = ili9xxx_set_contrast,
+#endif
 	.get_capabilities = ili9xxx_get_capabilities,
 	.set_pixel_format = ili9xxx_set_pixel_format,
 	.set_orientation = ili9xxx_set_orientation,
 };
+
+#ifdef CONFIG_ILI9340
+static const struct ili9xxx_quirks ili9340_quirks = {
+	.cmd_set = CMD_SET_1,
+};
+#endif
+
+#ifdef CONFIG_ILI9341
+static const struct ili9xxx_quirks ili9341_quirks = {
+	.cmd_set = CMD_SET_1,
+};
+#endif
+
+#ifdef CONFIG_ILI9342C
+static const struct ili9xxx_quirks ili9342c_quirks = {
+	.cmd_set = CMD_SET_2,
+};
+#endif
+
+#ifdef CONFIG_ILI9488
+static const struct ili9xxx_quirks ili9488_quirks = {
+	.cmd_set = CMD_SET_1,
+};
+#endif
 
 #define INST_DT_ILI9XXX(n, t) DT_INST(n, ilitek_ili##t)
 
@@ -438,56 +517,48 @@ static const struct display_driver_api ili9xxx_api = {
 	ILI##t##_REGS_INIT(n);                                                 \
 									       \
 	static const struct ili9xxx_config ili9xxx_config_##n = {              \
-		.spi_name = DT_BUS_LABEL(INST_DT_ILI9XXX(n, t)),               \
-		.spi_addr = DT_REG_ADDR(INST_DT_ILI9XXX(n, t)),                \
-		.spi_max_freq = UTIL_AND(                                      \
-			DT_HAS_PROP(INST_DT_ILI9XXX(n, t), spi_max_frequency), \
-			DT_PROP(INST_DT_ILI9XXX(n, t), spi_max_frequency)),    \
-		.spi_cs_label = UTIL_AND(                                      \
-			DT_SPI_DEV_HAS_CS_GPIOS(INST_DT_ILI9XXX(n, t)),        \
-			DT_SPI_DEV_CS_GPIOS_LABEL(INST_DT_ILI9XXX(n, t))),     \
-		.spi_cs_pin = UTIL_AND(                                        \
-			DT_SPI_DEV_HAS_CS_GPIOS(INST_DT_ILI9XXX(n, t)),        \
-			DT_SPI_DEV_CS_GPIOS_PIN(INST_DT_ILI9XXX(n, t))),       \
-		.spi_cs_flags = UTIL_AND(                                      \
-			DT_SPI_DEV_HAS_CS_GPIOS(INST_DT_ILI9XXX(n, t)),        \
-			DT_SPI_DEV_CS_GPIOS_FLAGS(INST_DT_ILI9XXX(n, t))),     \
-		.cmd_data_label =                                              \
-			DT_GPIO_LABEL(INST_DT_ILI9XXX(n, t), cmd_data_gpios),  \
-		.cmd_data_pin =                                                \
-			DT_GPIO_PIN(INST_DT_ILI9XXX(n, t), cmd_data_gpios),    \
-		.cmd_data_flags =                                              \
-			DT_GPIO_FLAGS(INST_DT_ILI9XXX(n, t), cmd_data_gpios),  \
-		.reset_label = UTIL_AND(                                       \
-			DT_NODE_HAS_PROP(INST_DT_ILI9XXX(n, t), reset_gpios),  \
-			DT_GPIO_LABEL(INST_DT_ILI9XXX(n, t), reset_gpios)),    \
-		.reset_pin = UTIL_AND(                                         \
-			DT_NODE_HAS_PROP(INST_DT_ILI9XXX(n, t), reset_gpios),  \
-			DT_GPIO_PIN(INST_DT_ILI9XXX(n, t), reset_gpios)),      \
-		.reset_flags = UTIL_AND(                                       \
-			DT_NODE_HAS_PROP(INST_DT_ILI9XXX(n, t), reset_gpios),  \
-			DT_GPIO_FLAGS(INST_DT_ILI9XXX(n, t), reset_gpios)),    \
+		.quirks = &ili##t##_quirks,                                    \
+		.mipi_dev = DEVICE_DT_GET(DT_PARENT(INST_DT_ILI9XXX(n, t))),   \
+		.dbi_config = {                                                \
+			.mode = MIPI_DBI_MODE_SPI_4WIRE,                       \
+			.config = MIPI_DBI_SPI_CONFIG_DT(                      \
+						INST_DT_ILI9XXX(n, t),         \
+						SPI_OP_MODE_MASTER |           \
+						SPI_WORD_SET(8),               \
+						0),                            \
+		},                                                             \
 		.pixel_format = DT_PROP(INST_DT_ILI9XXX(n, t), pixel_format),  \
 		.rotation = DT_PROP(INST_DT_ILI9XXX(n, t), rotation),          \
 		.x_resolution = ILI##t##_X_RES,                                \
 		.y_resolution = ILI##t##_Y_RES,                                \
+		.inversion = DT_PROP(INST_DT_ILI9XXX(n, t), display_inversion),\
 		.regs = &ili9xxx_regs_##n,                                     \
 		.regs_init_fn = ili##t##_regs_init,                            \
 	};                                                                     \
 									       \
 	static struct ili9xxx_data ili9xxx_data_##n;                           \
 									       \
-	DEVICE_AND_API_INIT(ili9xxx_##n, DT_LABEL(INST_DT_ILI9XXX(n, t)),      \
-			    ili9xxx_init, &ili9xxx_data_##n,                   \
+	DEVICE_DT_DEFINE(INST_DT_ILI9XXX(n, t), ili9xxx_init,                  \
+			    NULL, &ili9xxx_data_##n,                           \
 			    &ili9xxx_config_##n, POST_KERNEL,                  \
-			    CONFIG_APPLICATION_INIT_PRIORITY, &ili9xxx_api);
+			    CONFIG_DISPLAY_INIT_PRIORITY, &ili9xxx_api)
 
 #define DT_INST_FOREACH_ILI9XXX_STATUS_OKAY(t)                                 \
-	UTIL_LISTIFY(DT_NUM_INST_STATUS_OKAY(ilitek_ili##t), ILI9XXX_INIT, t)
+	LISTIFY(DT_NUM_INST_STATUS_OKAY(ilitek_ili##t), ILI9XXX_INIT, (;), t)
 
 #ifdef CONFIG_ILI9340
 #include "display_ili9340.h"
 DT_INST_FOREACH_ILI9XXX_STATUS_OKAY(9340);
+#endif
+
+#ifdef CONFIG_ILI9341
+#include "display_ili9341.h"
+DT_INST_FOREACH_ILI9XXX_STATUS_OKAY(9341);
+#endif
+
+#ifdef CONFIG_ILI9342C
+#include "display_ili9342c.h"
+DT_INST_FOREACH_ILI9XXX_STATUS_OKAY(9342c);
 #endif
 
 #ifdef CONFIG_ILI9488

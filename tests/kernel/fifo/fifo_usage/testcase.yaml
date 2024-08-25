@@ -1,3 +1,5 @@
 tests:
   kernel.fifo.usage:
-    tags: kernel
+    tags:
+      - kernel
+      - fifo

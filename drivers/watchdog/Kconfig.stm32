@@ -5,9 +5,11 @@
 # Copyright (c) 2019 Centaur Analytics, Inc
 # SPDX-License-Identifier: Apache-2.0
 
-menuconfig IWDG_STM32
+config IWDG_STM32
 	bool "Independent Watchdog (IWDG) Driver for STM32 family of MCUs"
-	depends on SOC_FAMILY_STM32
+	default y
+	depends on DT_HAS_ST_STM32_WATCHDOG_ENABLED
+	select HAS_WDT_DISABLE_AT_BOOT
 	help
 	  Enable IWDG driver for STM32 line of MCUs
 
@@ -29,6 +31,7 @@ config IWDG_STM32_INITIAL_TIMEOUT
 
 config WWDG_STM32
 	bool "System Window Watchdog (WWDG) Driver for STM32 family of MCUs"
-	depends on SOC_FAMILY_STM32
+	default y
+	depends on DT_HAS_ST_STM32_WINDOW_WATCHDOG_ENABLED
 	help
 	  Enable WWDG driver for STM32 line of MCUs

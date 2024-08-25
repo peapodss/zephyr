@@ -1,114 +1,126 @@
-name: Compliance
+name: Compliance Checks
 
-on: pull_request
+on:
+  pull_request:
+    types:
+    - edited
+    - opened
+    - reopened
+    - synchronize
 
 jobs:
-  compliance_job:
-    runs-on: ubuntu-latest
+  check_compliance:
+    runs-on: ubuntu-22.04
     name: Run compliance checks on patch series (PR)
     steps:
+    - name: Update PATH for west
+      run: |
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
     - name: Checkout the code
-      uses: actions/checkout@v1
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.11
 
     - name: cache-pip
-      uses: actions/cache@v1
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-doc-pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/compliance.yml') }}
 
     - name: Install python dependencies
       run: |
         pip3 install setuptools
         pip3 install wheel
-        pip3 install python-magic junitparser gitlint pylint pykwalify
+        pip3 install python-magic lxml junitparser gitlint pylint pykwalify yamllint clang-format unidiff
         pip3 install west
 
+    - name: west setup
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        git config --global user.email "you@example.com"
+        git config --global user.name "Your Name"
+        git remote -v
+        # Ensure there's no merge commits in the PR
+        [[ "$(git rev-list --merges --count origin/${BASE_REF}..)" == "0" ]] || \
+        (echo "::error ::Merge commits not allowed, rebase instead";false)
+        git rebase origin/${BASE_REF}
+        # debug
+        git log  --pretty=oneline | head -n 10
+        west init -l . || true
+        west config manifest.group-filter -- +ci,-optional
+        west update -o=--depth=1 -n 2>&1 1> west.update.log || west update -o=--depth=1 -n 2>&1 1> west.update2.log
+
+    - name: Check for PR description
+      if: ${{ github.event.pull_request.body == '' }}
+      continue-on-error: true
+      id: pr_description
+      run: |
+        echo "Pull request description cannot be empty."
+        exit 1
+
     - name: Run Compliance Tests
+      continue-on-error: true
       id: compliance
       env:
         BASE_REF: ${{ github.base_ref }}
       run: |
-        export PATH=$PATH:~/.local/bin
         export ZEPHYR_BASE=$PWD
-        git config --global user.email "you@example.com"
-        git config --global user.name "Your Name"
-        git rebase origin/${BASE_REF}
-        ./scripts/ci/check_compliance.py -m Codeowners -m Devicetree -m Gitlint -m Identity -m Nits -m pylint -m checkpatch -m Kconfig -c origin/${BASE_REF}.. || true
+        # debug
+        ls -la
+        git log  --pretty=oneline | head -n 10
+        # Increase rename limit to allow for large PRs
+        git config diff.renameLimit 10000
+        ./scripts/ci/check_compliance.py --annotate -e KconfigBasic \
+        -c origin/${BASE_REF}..
 
     - name: upload-results
-      uses: actions/upload-artifact@master
-      continue-on-error: True
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
       with:
         name: compliance.xml
         path: compliance.xml
 
     - name: check-warns
       run: |
-        if [ -s Nits.txt ]; then
-           errors=$(cat Nits.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Nits.txt::$errors"
-           exit=1
-        fi
-        if [ -s checkpatch.txt ]; then
-           errors=$(cat checkpatch.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Checkpatch.txt::$errors"
-           exit=1
-        fi
-        if [ -s Identity.txt ]; then
-           errors=$(cat Identity.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Identity.txt::$errors"
-           exit=1
-        fi
-        if [ -s Gitlint.txt ]; then
-           errors=$(cat Gitlint.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Gitlint.txt::$errors"
-           exit=1
-        fi
-        if [ -s pylint.txt ]; then
-           errors=$(cat pylint.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=pylint.txt::$errors"
-           exit=1
-        fi
-        if [ -s Devicetree.txt ]; then
-           errors=$(cat Devicetree.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Devicetree.txt::$errors"
-           exit=1
-        fi
-        if [ -s Kconfig.txt ]; then
-           errors=$(cat Kconfig.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Kconfig.txt::$errors"
-           exit=1
-        fi
-        if [ -s Codeowners.txt ]; then
-           errors=$(cat Codeowners.txt)
-           errors="${errors//'%'/'%25'}"
-           errors="${errors//$'\n'/'%0A'}"
-           errors="${errors//$'\r'/'%0D'}"
-           echo "::error file=Codeowners.txt::$errors"
-           exit=1
+        if [[ ! -s "compliance.xml" ]]; then
+          exit 1;
         fi
 
-        if [ ${exit} == 1 ]; then
+        warns=("ClangFormat")
+        files=($(./scripts/ci/check_compliance.py -l))
+
+        for file in "${files[@]}"; do
+          f="${file}.txt"
+          if [[ -s $f ]]; then
+            results=$(cat $f)
+            results="${results//'%'/'%25'}"
+            results="${results//$'\n'/'%0A'}"
+            results="${results//$'\r'/'%0D'}"
+
+            if [[ "${warns[@]}" =~ "${file}" ]]; then
+              echo "::warning file=${f}::$results"
+            else
+              echo "::error file=${f}::$results"
+              exit=1
+            fi
+          fi
+        done
+
+        if [ "${exit}" == "1" ]; then
+          echo "Compliance error, check for error messages in the \"Run Compliance Tests\" step"
+          echo "You can run this step locally with the ./scripts/ci/check_compliance.py script."
+          exit 1;
+        fi
+
+        if [ "${{ steps.pr_description.outcome }}" == "failure" ]; then
+          echo "PR description cannot be empty"
           exit 1;
         fi

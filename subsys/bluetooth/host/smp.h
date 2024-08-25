@@ -13,6 +13,7 @@ struct bt_smp_hdr {
 	uint8_t  code;
 } __packed;
 
+#define BT_SMP_ERR_SUCCESS                      0x00
 #define BT_SMP_ERR_PASSKEY_ENTRY_FAILED		0x01
 #define BT_SMP_ERR_OOB_NOT_AVAIL		0x02
 #define BT_SMP_ERR_AUTH_REQUIREMENTS		0x03
@@ -27,6 +28,7 @@ struct bt_smp_hdr {
 #define BT_SMP_ERR_NUMERIC_COMP_FAILED		0x0c
 #define BT_SMP_ERR_BREDR_PAIRING_IN_PROGRESS	0x0d
 #define BT_SMP_ERR_CROSS_TRANSP_NOT_ALLOWED	0x0e
+#define BT_SMP_ERR_KEY_REJECTED			0x0f
 
 #define BT_SMP_IO_DISPLAY_ONLY			0x00
 #define BT_SMP_IO_DISPLAY_YESNO			0x01
@@ -38,7 +40,7 @@ struct bt_smp_hdr {
 #define BT_SMP_OOB_NOT_PRESENT			0x00
 #define BT_SMP_OOB_PRESENT			0x01
 
-#define BT_SMP_MIN_ENC_KEY_SIZE			7
+#define BT_SMP_MIN_ENC_KEY_SIZE			CONFIG_BT_SMP_MIN_ENC_KEY_SIZE
 #define BT_SMP_MAX_ENC_KEY_SIZE			16
 
 #define BT_SMP_DIST_ENC_KEY			0x01
@@ -86,8 +88,8 @@ struct bt_smp_encrypt_info {
 	uint8_t  ltk[16];
 } __packed;
 
-#define BT_SMP_CMD_MASTER_IDENT			0x07
-struct bt_smp_master_ident {
+#define BT_SMP_CMD_CENTRAL_IDENT		0x07
+struct bt_smp_central_ident {
 	uint8_t ediv[2];
 	uint8_t rand[8];
 } __packed;
@@ -123,6 +125,13 @@ struct bt_smp_dhkey_check {
 	uint8_t e[16];
 } __packed;
 
+#define BT_SMP_KEYPRESS_NOTIFICATION		0x0e
+struct bt_smp_keypress_notif {
+	uint8_t type;
+} __packed;
+
+#define BT_SMP_NUM_CMDS                         0x0f
+
 int bt_smp_start_security(struct bt_conn *conn);
 bool bt_smp_request_ltk(struct bt_conn *conn, uint64_t rand, uint16_t ediv,
 			uint8_t *ltk);
@@ -133,6 +142,9 @@ int bt_smp_br_send_pairing_req(struct bt_conn *conn);
 
 int bt_smp_init(void);
 
+int bt_smp_auth_cb_overlay(struct bt_conn *conn, const struct bt_conn_auth_cb *cb);
+int bt_smp_auth_keypress_notify(struct bt_conn *conn,
+				enum bt_conn_auth_keypress type);
 int bt_smp_auth_passkey_entry(struct bt_conn *conn, unsigned int passkey);
 int bt_smp_auth_passkey_confirm(struct bt_conn *conn);
 int bt_smp_auth_pairing_confirm(struct bt_conn *conn);
@@ -167,3 +179,26 @@ int bt_smp_sign(struct bt_conn *conn, struct net_buf *buf);
 
 /** Generate IRK from Identity Root (IR) */
 int bt_smp_irk_get(uint8_t *ir, uint8_t *irk);
+
+/** Converts a SMP error to string.
+ *
+ * The error codes are described in the Bluetooth Core specification,
+ * Vol 3, Part H, Section 3.5.5.
+ *
+ * The Security Manager Protocol documentation found in Vol 4, Part H,
+ * describes when the different error codes are used.
+ *
+ * See also the defined BT_SMP_ERR_* macros.
+ *
+ * @return The string representation of the SMP error code.
+ */
+#if defined(CONFIG_BT_SMP_ERR_TO_STR)
+const char *bt_smp_err_to_str(uint8_t smp_err);
+#else
+static inline const char *bt_smp_err_to_str(uint8_t smp_err)
+{
+	ARG_UNUSED(smp_err);
+
+	return "";
+}
+#endif

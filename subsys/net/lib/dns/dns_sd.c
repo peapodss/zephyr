@@ -12,19 +12,20 @@
 #include <string.h>
 #include <strings.h>
 
-#include <net/net_context.h>
-#include <net/net_core.h>
-#include <net/dns_sd.h>
-#include <sys/util.h>
-#include <zephyr.h>
+#include <zephyr/net/net_context.h>
+#include <zephyr/net/net_core.h>
+#include <zephyr/net/dns_sd.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/kernel.h>
 
 #include "dns_pack.h"
 #include "dns_sd.h"
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(net_dns_sd, CONFIG_DNS_SD_LOG_LEVEL);
 
 const char dns_sd_empty_txt[1];
+const uint16_t dns_sd_port_zero;
 
 #ifndef CONFIG_NET_TEST
 
@@ -102,6 +103,7 @@ bool label_is_valid(const char *label, size_t label_size)
 	size_t i;
 
 	if (label == NULL) {
+		NET_DBG("label is NULL");
 		return false;
 	}
 
@@ -112,16 +114,20 @@ bool label_is_valid(const char *label, size_t label_size)
 
 	if (label_size < DNS_LABEL_MIN_SIZE ||
 	    label_size > DNS_LABEL_MAX_SIZE) {
+		NET_DBG("label invalid size (%zu, min: %u, max: %u)",
+			 label_size,
+			 DNS_LABEL_MIN_SIZE,
+			 DNS_LABEL_MAX_SIZE);
 		return false;
 	}
 
 	for (i = 0; i < label_size; ++i) {
-		if (isalpha((int)label[i])) {
+		if (isalpha((int)label[i]) != 0) {
 			continue;
 		}
 
 		if (i > 0) {
-			if (isdigit((int)label[i])) {
+			if (isdigit((int)label[i]) != 0) {
 				continue;
 			}
 
@@ -130,6 +136,7 @@ bool label_is_valid(const char *label, size_t label_size)
 			}
 		}
 
+		NET_DBG("label '%s' contains illegal byte 0x%02x", label, label[i]);
 		return false;
 	}
 
@@ -142,20 +149,20 @@ static bool instance_is_valid(const char *instance)
 	size_t instance_size;
 
 	if (instance == NULL) {
-		NET_DBG("label is NULL");
+		NET_DBG("instance is NULL");
 		return false;
 	}
 
 	instance_size = strlen(instance);
 	if (instance_size < DNS_SD_INSTANCE_MIN_SIZE) {
-		NET_DBG("label '%s' is too small (%zu, min: %u)",
+		NET_DBG("instance '%s' is too small (%zu, min: %u)",
 			instance, instance_size,
 			DNS_SD_INSTANCE_MIN_SIZE);
 		return false;
 	}
 
 	if (instance_size > DNS_SD_INSTANCE_MAX_SIZE) {
-		NET_DBG("label '%s' is too big (%zu, max: %u)",
+		NET_DBG("instance '%s' is too big (%zu, max: %u)",
 			instance, instance_size,
 			DNS_SD_INSTANCE_MAX_SIZE);
 		return false;
@@ -180,19 +187,19 @@ static bool service_is_valid(const char *service)
 	size_t service_size;
 
 	if (service == NULL) {
-		NET_DBG("label is NULL");
+		NET_DBG("service is NULL");
 		return false;
 	}
 
 	service_size = strlen(service);
 	if (service_size < DNS_SD_SERVICE_MIN_SIZE) {
-		NET_DBG("label '%s' is too small (%zu, min: %u)",
+		NET_DBG("service '%s' is too small (%zu, min: %u)",
 			service, service_size, DNS_SD_SERVICE_MIN_SIZE);
 		return false;
 	}
 
 	if (service_size > DNS_SD_SERVICE_MAX_SIZE) {
-		NET_DBG("label '%s' is too big (%zu, max: %u)",
+		NET_DBG("service '%s' is too big (%zu, max: %u)",
 			service, service_size, DNS_SD_SERVICE_MAX_SIZE);
 		return false;
 	}
@@ -217,13 +224,13 @@ static bool proto_is_valid(const char *proto)
 	size_t proto_size;
 
 	if (proto == NULL) {
-		NET_DBG("label is NULL");
+		NET_DBG("proto is NULL");
 		return false;
 	}
 
 	proto_size = strlen(proto);
 	if (proto_size != DNS_SD_PROTO_SIZE) {
-		NET_DBG("label '%s' wrong size (%zu, exp: %u)",
+		NET_DBG("proto '%s' wrong size (%zu, exp: %u)",
 			proto, proto_size, DNS_SD_PROTO_SIZE);
 		return false;
 	}
@@ -244,19 +251,19 @@ static bool domain_is_valid(const char *domain)
 	size_t domain_size;
 
 	if (domain == NULL) {
-		NET_DBG("label is NULL");
+		NET_DBG("domain is NULL");
 		return false;
 	}
 
 	domain_size = strlen(domain);
 	if (domain_size < DNS_SD_DOMAIN_MIN_SIZE) {
-		NET_DBG("label '%s' is too small (%zu, min: %u)",
+		NET_DBG("domain '%s' is too small (%zu, min: %u)",
 			domain, domain_size, DNS_SD_DOMAIN_MIN_SIZE);
 		return false;
 	}
 
 	if (domain_size > DNS_SD_DOMAIN_MAX_SIZE) {
-		NET_DBG("label '%s' is too big (%zu, max: %u)",
+		NET_DBG("domain '%s' is too big (%zu, max: %u)",
 			domain, domain_size, DNS_SD_DOMAIN_MAX_SIZE);
 		return false;
 	}
@@ -660,33 +667,40 @@ static bool port_in_use_sockaddr(uint16_t proto, uint16_t port,
 		|| net_context_port_in_use(proto, port, anyp);
 }
 
-static bool port_in_use(uint16_t proto, uint16_t port, const struct in_addr *addr4,
-	const struct in6_addr *addr6)
+static bool port_in_use(uint16_t proto, uint16_t port,
+			const struct in_addr *addr4,
+			const struct in6_addr *addr6)
 {
-	bool r;
-	struct sockaddr sa;
+	bool ret = false;
 
 	if (addr4 != NULL) {
-		net_sin(&sa)->sin_family = AF_INET;
-		net_sin(&sa)->sin_addr = *addr4;
+		struct sockaddr_in sa = { 0 };
 
-		r = port_in_use_sockaddr(proto, port, &sa);
-		if (r) {
-			return true;
+		sa.sin_family = AF_INET;
+		sa.sin_addr = *addr4;
+
+		ret = port_in_use_sockaddr(proto, port,
+					   (struct sockaddr *)&sa);
+		if (ret) {
+			goto out;
 		}
 	}
 
 	if (addr6 != NULL) {
-		net_sin6(&sa)->sin6_family = AF_INET6;
-		net_sin6(&sa)->sin6_addr = *addr6;
+		struct sockaddr_in6 sa = { 0 };
 
-		r = port_in_use_sockaddr(proto, port, &sa);
-		if (r) {
-			return true;
+		sa.sin6_family = AF_INET6;
+		sa.sin6_addr = *addr6;
+
+		ret = port_in_use_sockaddr(proto, port,
+					   (struct sockaddr *)&sa);
+		if (ret) {
+			goto out;
 		}
 	}
 
-	return false;
+out:
+	return ret;
 }
 #else /* CONFIG_NET_TEST */
 static inline bool port_in_use(uint16_t proto, uint16_t port, const struct in_addr *addr4,
@@ -699,9 +713,9 @@ static inline bool port_in_use(uint16_t proto, uint16_t port, const struct in_ad
 }
 #endif /* CONFIG_NET_TEST */
 
-int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
-	const struct in_addr *addr4, const struct in6_addr *addr6,
-	uint8_t *buf, uint16_t buf_size)
+
+int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst, const struct in_addr *addr4,
+			    const struct in6_addr *addr6, uint8_t *buf, uint16_t buf_size)
 {
 	/*
 	 * RFC 6763 Section 12.1
@@ -734,9 +748,8 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	}
 
 	if (*(inst->port) == 0) {
-		NET_DBG("Ephemeral port %u for %s.%s.%s.%s "
-			"not initialized", ntohs(*(inst->port)),
-			inst->instance, inst->service, inst->proto,
+		NET_DBG("Ephemeral port %u for %s.%s.%s.%s not initialized",
+			ntohs(*(inst->port)), inst->instance, inst->service, inst->proto,
 			inst->domain);
 		return -EHOSTDOWN;
 	}
@@ -756,10 +769,8 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	}
 
 	/* first add the answer record */
-	r = add_ptr_record(inst, DNS_SD_PTR_TTL, buf, offset,
-			   buf_size - offset,
-			   &service_offset, &instance_offset,
-			   &domain_offset);
+	r = add_ptr_record(inst, DNS_SD_PTR_TTL, buf, offset, buf_size - offset, &service_offset,
+			   &instance_offset, &domain_offset);
 	if (r < 0) {
 		return r; /* LCOV_EXCL_LINE */
 	}
@@ -768,9 +779,7 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	offset += r;
 
 	/* then add the additional records */
-	r = add_txt_record(inst, DNS_SD_TXT_TTL, instance_offset, buf,
-			   offset,
-			   buf_size - offset);
+	r = add_txt_record(inst, DNS_SD_TXT_TTL, instance_offset, buf, offset, buf_size - offset);
 	if (r < 0) {
 		return r; /* LCOV_EXCL_LINE */
 	}
@@ -778,9 +787,8 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	rsp->arcount++;
 	offset += r;
 
-	r = add_srv_record(inst, DNS_SD_SRV_TTL, instance_offset,
-			   domain_offset,
-			   buf, offset, buf_size - offset, &host_offset);
+	r = add_srv_record(inst, DNS_SD_SRV_TTL, instance_offset, domain_offset, buf, offset,
+			   buf_size - offset, &host_offset);
 	if (r < 0) {
 		return r; /* LCOV_EXCL_LINE */
 	}
@@ -789,12 +797,10 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	offset += r;
 
 	if (addr6 != NULL) {
-		r = add_aaaa_record(inst, DNS_SD_AAAA_TTL, host_offset,
-				    addr6->s6_addr,
-				    buf, offset,
+		r = add_aaaa_record(inst, DNS_SD_AAAA_TTL, host_offset, addr6->s6_addr, buf, offset,
 				    buf_size - offset); /* LCOV_EXCL_LINE */
 		if (r < 0) {
-			return r;                       /* LCOV_EXCL_LINE */
+			return r; /* LCOV_EXCL_LINE */
 		}
 
 		rsp->arcount++;
@@ -803,8 +809,7 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 
 	if (addr4 != NULL) {
 		tmp = htonl(*(addr4->s4_addr32));
-		r = add_a_record(inst, DNS_SD_A_TTL, host_offset,
-				 tmp, buf, offset,
+		r = add_a_record(inst, DNS_SD_A_TTL, host_offset, tmp, buf, offset,
 				 buf_size - offset);
 		if (r < 0) {
 			return r; /* LCOV_EXCL_LINE */
@@ -818,6 +823,94 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst,
 	rsp->flags = htons(BIT(15) | BIT(10));
 	rsp->ancount = htons(rsp->ancount);
 	rsp->arcount = htons(rsp->arcount);
+
+	return offset;
+}
+
+int dns_sd_handle_service_type_enum(const struct dns_sd_rec *inst,
+				    const struct in_addr *addr4, const struct in6_addr *addr6,
+				    uint8_t *buf, uint16_t buf_size)
+{
+	static const char query[] = { "\x09_services\x07_dns-sd\x04_udp\x05local" };
+	/* offset of '.local' in the above */
+	uint16_t domain_offset = DNS_SD_PTR_MASK | 35;
+	uint16_t proto;
+	int name_size;
+	uint16_t service_size;
+	uint16_t offset = sizeof(struct dns_header);
+	struct dns_rr *rr;
+	struct dns_header *const rsp = (struct dns_header *)buf;
+
+	if (!rec_is_valid(inst)) {
+		return -EINVAL;
+	}
+
+	if (*(inst->port) == 0) {
+		NET_DBG("Ephemeral port %u for %s.%s.%s.%s "
+			"not initialized",
+			ntohs(*(inst->port)), inst->instance, inst->service, inst->proto,
+			inst->domain);
+		return -EHOSTDOWN;
+	}
+
+	if (strncmp("_tcp", inst->proto, DNS_SD_PROTO_SIZE) == 0) {
+		proto = IPPROTO_TCP;
+	} else if (strncmp("_udp", inst->proto, DNS_SD_PROTO_SIZE) == 0) {
+		proto = IPPROTO_UDP;
+	} else {
+		NET_DBG("invalid protocol %s", inst->proto);
+		return -EINVAL;
+	}
+
+	if (!port_in_use(proto, ntohs(*(inst->port)), addr4, addr6)) {
+		/* Service is not yet bound, so do not advertise */
+		NET_DBG("service not bound");
+		return -EHOSTDOWN;
+	}
+
+	service_size = strlen(inst->service);
+	name_size =
+		/* uncompressed. e.g. "._foo._tcp.local." */
+		sizeof(query)
+		+ sizeof(*rr)
+		/* compressed e.g. ._googlecast._tcp" followed by (DNS_SD_PTR_MASK | 0x0abc) */
+		+ DNS_LABEL_LEN_SIZE + service_size
+		+ DNS_LABEL_LEN_SIZE + DNS_SD_PROTO_SIZE
+		+ DNS_POINTER_SIZE;
+
+	if (offset > buf_size || name_size >= buf_size - offset) {
+		NET_DBG("Buffer too small. required: %u available: %d", name_size,
+			(int)buf_size - (int)offset);
+		return -ENOSPC;
+	}
+
+	memset(rsp, 0, sizeof(*rsp));
+	memcpy(&buf[offset], query, sizeof(query));
+	offset += sizeof(query);
+
+	rr = (struct dns_rr *)&buf[offset];
+	rr->type = htons(DNS_RR_TYPE_PTR);
+	rr->class_ = htons(DNS_CLASS_IN);
+	rr->ttl = htonl(DNS_SD_PTR_TTL);
+	rr->rdlength = htons(0
+		+ DNS_LABEL_LEN_SIZE + service_size
+		+ DNS_LABEL_LEN_SIZE + DNS_SD_PROTO_SIZE
+		+ DNS_POINTER_SIZE);
+	offset += sizeof(*rr);
+
+	buf[offset++] = service_size;
+	memcpy(&buf[offset], inst->service, service_size);
+	offset += service_size;
+	buf[offset++] = DNS_SD_PROTO_SIZE;
+	memcpy(&buf[offset], inst->proto, DNS_SD_PROTO_SIZE);
+	offset += DNS_SD_PROTO_SIZE;
+	domain_offset = htons(domain_offset);
+	memcpy(&buf[offset], &domain_offset, sizeof(domain_offset));
+	offset += sizeof(domain_offset);
+
+	/* Set the Response and AA bits */
+	rsp->flags = htons(BIT(15) | BIT(10));
+	rsp->ancount = htons(1);
 
 	return offset;
 }
@@ -847,7 +940,7 @@ bool dns_sd_rec_match(const struct dns_sd_rec *record,
 	};
 
 	if (!rec_is_valid(record)) {
-		LOG_WRN("DNS SD record at %p is invalid", record);
+		LOG_DBG("DNS SD record at %p is invalid", record);
 		return false;
 	}
 
@@ -872,9 +965,9 @@ bool dns_sd_rec_match(const struct dns_sd_rec *record,
 
 		/* check for the "wildcard" pointer */
 		if (filt_label != NULL) {
-			if (!checkers[i](filt_label)) {
+			if (!checkers[i](rec_label)) {
 				LOG_WRN("invalid %s label: '%s'",
-					names[i], filt_label);
+					names[i], rec_label);
 				return false;
 			}
 
@@ -886,87 +979,183 @@ bool dns_sd_rec_match(const struct dns_sd_rec *record,
 	}
 
 	/* check for the "wildcard" port */
-	if (filter->port != NULL && *(record->port) != *(filter->port)) {
-		return false;
+	if (filter->port != NULL && *(filter->port) != 0) {
+		if (*(record->port) != *(filter->port)) {
+			return false;
+		}
 	}
 
 	return true;
 }
 
-int dns_sd_extract_service_proto_domain(const uint8_t *query,
-	size_t query_size, struct dns_sd_rec *record, char *service,
-	size_t service_size, char *proto, size_t proto_size, char *domain,
-	size_t domain_size)
+int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_rec *record,
+			 char **label, size_t *size, size_t *n)
 {
-	uint16_t offs;
-	uint8_t label_size;
+	size_t i;
+	size_t offset;
+	size_t qlabels;
+	size_t qsize;
+	const size_t N = (n) ? (*n) : 0;
 
-	if (query == NULL || record == NULL || service == NULL
-	    || proto == NULL || domain == NULL) {
-		NET_DBG("one or more arguments are NULL");
+	/*
+	 * See RFC 6763, 7.2. Service Name Length Limits
+	 *
+	 *            <sn>._tcp.<servicedomain>.<parentdomain>.
+	 * <Instance>.<sn>._tcp.<servicedomain>.<parentdomain>.
+	 * <sub>._sub.<sn>._tcp.<servicedomain>.<parentdomain>.
+	 */
+	__ASSERT(DNS_SD_MIN_LABELS <= N, "invalid number of labels %zu", N);
+	__ASSERT(!(query == NULL || label == NULL || size == NULL || n == NULL),
+		 "one or more required arguments are NULL");
+	__ASSERT(query + query_size >= query, "query %p + query_size %zu  wraps NULL", query,
+		 query_size);
+	__ASSERT(label + N >= label, "label %p + n %zu  wraps NULL", label, N);
+	__ASSERT(size + N >= size, "size %p + n %zu  wraps NULL", size, N);
+	for (i = 0; i < N; ++i) {
+		if (label[i] == NULL) {
+			__ASSERT(label[i] != NULL, "label[%zu] is NULL", i);
+		}
+	}
+
+	if (query_size <= DNS_MSG_HEADER_SIZE) {
+		NET_DBG("query size %zu is less than DNS_MSG_HEADER_SIZE %d", query_size,
+			DNS_MSG_HEADER_SIZE);
 		return -EINVAL;
 	}
 
-	if (query_size <= DNS_MSG_HEADER_SIZE
-	    || service_size < DNS_SD_SERVICE_MAX_SIZE + 1
-	    || proto_size < DNS_SD_PROTO_SIZE + 1
-	    || domain_size < DNS_SD_DOMAIN_MAX_SIZE + 1
-	    ) {
-		NET_DBG("one or more size arguments are too small");
-		return -EINVAL;
+	query += DNS_MSG_HEADER_SIZE;
+	query_size -= DNS_MSG_HEADER_SIZE;
+	offset = DNS_MSG_HEADER_SIZE;
+	dns_sd_create_wildcard_filter(record);
+	/* valid record must have non-NULL port */
+	record->port = &dns_sd_port_zero;
+
+	/* also counts labels */
+	for (i = 0, qlabels = 0; query_size > 0;) {
+		qsize = *query;
+		++offset;
+		++query;
+		--query_size;
+
+		if (qsize == 0) {
+			break;
+		}
+
+		++qlabels;
+		if (qsize >= query_size) {
+			NET_DBG("claimed query size %zu > query buffer size %zu", qsize,
+				query_size);
+			return -EINVAL;
+		}
+
+		if (qsize >= size[i]) {
+			NET_DBG("qsize %zu >= size[%zu] %zu", qsize, i, size[i]);
+			return -ENOBUFS;
+		}
+
+		if (i < N) {
+			/* only extract the label if there is storage for it */
+			memcpy(label[i], query, qsize);
+			label[i][qsize] = '\0';
+			size[i] = qsize;
+			++i;
+		}
+
+		offset += qsize;
+		query += qsize;
+		query_size -= qsize;
 	}
 
-	memset(record, 0, sizeof(*record));
-	offs = DNS_MSG_HEADER_SIZE;
-
-	/* Copy service label to '\0'-terminated buffer */
-	label_size = query[offs];
-	if (label_size == 0  || label_size > service_size - 1
-	    || offs + label_size > query_size) {
-		NET_DBG("could not get service");
-		return -EINVAL;
-	} else {
-		strncpy(service, &query[offs + 1], label_size);
-		service[label_size] = '\0';
-		offs += label_size + 1;
+	/* write-out the actual number of labels in 'n' */
+	for (*n = i; i < N; ++i) {
+		label[i] = NULL;
+		size[i] = 0;
 	}
 
-	/* Copy proto label to '\0'-terminated buffer */
-	label_size = query[offs];
-	if (label_size == 0 || label_size > proto_size - 1
-	    || offs + label_size > query_size) {
-		NET_DBG("could not get proto for '%s...'", service);
-		return -EINVAL;
-	} else {
-		strncpy(proto, &query[offs + 1], label_size);
-		proto[label_size] = '\0';
-		offs += label_size + 1;
+	if (qlabels > N) {
+		NET_DBG("too few buffers to extract query: qlabels: %zu, N: %zu",
+			qlabels, N);
+		return -ENOBUFS;
 	}
 
-	/* Copy domain label to '\0'-terminated buffer */
-	label_size = query[offs];
-	if (label_size == 0 || label_size > domain_size - 1
-	    || offs + label_size > query_size) {
-		NET_DBG("could not get domain for '%s.%s...'", service,
-			proto);
+	if (qlabels < DNS_SD_MIN_LABELS) {
+		NET_DBG("too few labels in query %zu, DNS_SD_MIN_LABELS: %d", qlabels,
+			DNS_SD_MIN_LABELS);
 		return -EINVAL;
-	} else {
-		strncpy(domain, &query[offs + 1], label_size);
-		domain[label_size] = '\0';
-		offs += label_size + 1;
+	} else if (qlabels == DNS_SD_MIN_LABELS) {
+		/* e.g. _zephyr._tcp.local */
+		record->service = label[0];
+		record->proto = label[1];
+		record->domain = label[2];
+
+		if (!service_is_valid(record->service)) {
+			NET_DBG("service '%s' is invalid", record->service);
+			return -EINVAL;
+		}
+
+		if (!proto_is_valid(record->proto)) {
+			NET_DBG("proto '%s' is invalid", record->proto);
+			return -EINVAL;
+		}
+
+		if (!domain_is_valid(record->domain)) {
+			NET_DBG("domain '%s' is invalid", record->domain);
+			return -EINVAL;
+		}
+	} else if (qlabels > DNS_SD_MIN_LABELS && qlabels < DNS_SD_MAX_LABELS) {
+		NET_DBG("unsupported number of labels %zu", qlabels);
+		return -EINVAL;
+	} else if (qlabels >= DNS_SD_MAX_LABELS) {
+		/* e.g.
+		 * "Zephyr 42"._zephyr._tcp.local, or
+		 * _domains._dns-sd._udp.local
+		 */
+		record->instance = label[0];
+		record->service = label[1];
+		record->proto = label[2];
+		record->domain = label[3];
+
+		if (!instance_is_valid(record->instance)) {
+			NET_DBG("service '%s' is invalid", record->instance);
+			return -EINVAL;
+		}
+
+		if (!service_is_valid(record->service)) {
+			NET_DBG("service '%s' is invalid", record->service);
+			return -EINVAL;
+		}
+
+		if (!proto_is_valid(record->proto)) {
+			NET_DBG("proto '%s' is invalid", record->proto);
+			return -EINVAL;
+		}
+
+		if (!domain_is_valid(record->domain)) {
+			NET_DBG("domain '%s' is invalid", record->domain);
+			return -EINVAL;
+		}
 	}
 
-	/* Check that we have reached the DNS terminator */
-	if (query[offs] != 0) {
-		NET_DBG("ignoring request for '%s.%s.%s...'",
-			service, proto, domain);
-		return -EINVAL;
+	return offset;
+}
+
+bool dns_sd_is_service_type_enumeration(const struct dns_sd_rec *rec)
+{
+	static const struct dns_sd_rec filter = {
+		.instance = "_services",
+		.service = "_dns-sd",
+		.proto = "_udp",
+		.domain = "local",
+	};
+
+	return dns_sd_rec_match(rec, &filter);
+}
+
+void dns_sd_create_wildcard_filter(struct dns_sd_rec *filter)
+{
+	if (filter != NULL) {
+		memset(filter, 0, sizeof(*filter));
+		filter->text = dns_sd_empty_txt;
+		filter->text_size = sizeof(dns_sd_empty_txt);
 	}
-
-	offs++;
-	record->service = service;
-	record->proto = proto;
-	record->domain = domain;
-
-	return offs;
 }

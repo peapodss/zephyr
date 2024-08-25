@@ -7,9 +7,15 @@
 *.swp
 *.swo
 *~
+
+# Emacs
+\#*\#
+
 build*/
-!doc/guides/build
+!doc/build/
+!scripts/build
 !tests/drivers/build_all
+!scripts/pylib/build_helpers
 cscope.*
 .dir
 
@@ -23,6 +29,8 @@ outdir
 outdir-*
 scripts/basic/fixdep
 scripts/gen_idt/gen_idt
+coverage-report
+doc-coverage.info
 doc/_build
 doc/doxygen
 doc/xml
@@ -32,7 +40,11 @@ doc/samples
 doc/latex
 doc/themes/zephyr-docs-theme
 sanity-out*
+twister-out*
+bsim_out
 bsim_bt_out
+myresults.xml
+tests/RunResults.xml
 scripts/grub
 doc/reference/kconfig/*.rst
 doc/doc.warnings
@@ -41,6 +53,15 @@ doc/doc.warnings
 .envrc
 .vscode
 hide-defaults-note
+venv
+.venv
+.DS_Store
+.clangd
+new.info
+
+# CI output
+compliance.xml
+_error.types
 
 # Tag files
 GPATH
@@ -50,3 +71,24 @@ TAGS
 tags
 
 .idea
+
+# from check_compliance.py
+BinaryFiles.txt
+BoardYml.txt
+Checkpatch.txt
+ClangFormat.txt
+DevicetreeBindings.txt
+GitDiffCheck.txt
+Gitlint.txt
+Identity.txt
+ImageSize.txt
+Kconfig.txt
+KconfigBasic.txt
+KconfigBasicNoModules.txt
+KconfigHWMv2.txt
+KeepSorted.txt
+MaintainersFormat.txt
+ModulesMaintainers.txt
+Nits.txt
+Pylint.txt
+YAMLLint.txt

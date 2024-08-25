@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#if defined(CONFIG_BT_DEBUG_MONITOR)
+#if defined(CONFIG_BT_MONITOR)
 
 #define BT_MONITOR_NEW_INDEX    0
 #define BT_MONITOR_DEL_INDEX    1
@@ -43,7 +43,7 @@
 
 #define BT_MONITOR_BASE_HDR_LEN  6
 
-#if defined(CONFIG_BT_BREDR)
+#if defined(CONFIG_BT_CLASSIC)
 #define BT_MONITOR_EXT_HDR_MAX 19
 #else
 #define BT_MONITOR_EXT_HDR_MAX 15
@@ -97,10 +97,10 @@ static inline uint8_t bt_monitor_opcode(struct net_buf *buf)
 
 void bt_monitor_send(uint16_t opcode, const void *data, size_t len);
 
-void bt_monitor_new_index(uint8_t type, uint8_t bus, bt_addr_t *addr,
+void bt_monitor_new_index(uint8_t type, uint8_t bus, const bt_addr_t *addr,
 			  const char *name);
 
-#else /* !CONFIG_BT_DEBUG_MONITOR */
+#else /* !CONFIG_BT_MONITOR */
 
 #define bt_monitor_send(opcode, data, len)
 #define bt_monitor_new_index(type, bus, addr, name)

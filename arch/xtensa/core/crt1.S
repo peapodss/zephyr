@@ -4,10 +4,10 @@
  */
 
 /*
- * Control arrives here at _start from the reset vector or from crt0-app.S.
+ * Control arrives here at _start from the reset vector.
  */
 
-#include <arch/xtensa/xtensa_rtos.h>
+#include <xtensa/coreasm.h>
 
 /* Exports */
 .global _start
@@ -22,8 +22,7 @@
  */
 
 .global __start
-.type	z_cstart, @function
-.type	z_mp_entry, @function
+.type	z_prep_c, @function
 
 
 /* Macros to abstract away ABI differences */
@@ -53,7 +52,7 @@ _start:
 	/*
 	 *  _start is typically NOT at the beginning of the text segment --
 	 *  it is always called from either the reset vector (__start) or other
-	 *  code that does equivalent initialization (such as crt0-app.S).
+	 *  code that does equivalent initialization.
 	 *
 	 *  Assumptions on entry to _start:
 	 *	- low (level-one) and medium priority interrupts are disabled
@@ -93,11 +92,21 @@ _start:
 	 */
 #if XCHAL_HAVE_EXCEPTIONS
 # ifdef __XTENSA_CALL0_ABI__
-	/* PS.WOE = 0, PS.UM = 1, PS.EXCM = 0, PS.INTLEVEL = 15 */
-	movi	a3, PS_UM|PS_INTLEVEL(15)
+	/*
+	 * PS.WOE = 0
+	 * PS.UM = 1
+	 * PS.EXCM = 0
+	 * PS.INTLEVEL = XCHAL_EXCM_LEVEL
+	 */
+	movi	a3, PS_UM|PS_INTLEVEL(XCHAL_EXCM_LEVEL)
 # else
-	/* PS.WOE = 1, PS.UM = 1, PS.EXCM = 0, PS.INTLEVEL = 15 */
-	movi	a3, PS_UM|PS_WOE|PS_INTLEVEL(15)
+	/*
+	 * PS.WOE = 1
+	 * PS.UM = 1
+	 * PS.EXCM = 0
+	 * PS.INTLEVEL = XCHAL_EXCM_LEVEL
+	 */
+	movi	a3, PS_UM|PS_WOE|PS_INTLEVEL(XCHAL_EXCM_LEVEL)
 # endif
 	wsr	a3, PS
 	rsync
@@ -136,13 +145,6 @@ _start:
 # ifdef __XTENSA_CALL0_ABI__
 	/* Clear a0 again as possible CALLX to __memmap_init changed it. */
 	movi	a0, 0
-# endif
-
-# if CONFIG_MP_NUM_CPUS > 1
-	/* Only clear BSS when running on core 0 */
-	rsr	a3, PRID
-	extui	a3, a3, 0, 8	/* extract core ID */
-	bnez	a3, .L3zte
 # endif
 
 	/*
@@ -186,20 +188,7 @@ _start:
 
 #endif /* !XCHAL_HAVE_BOOTLOADER */
 
-#if CONFIG_MP_NUM_CPUS > 1
-	/*
-	 * z_cstart() is only for CPU #0.
-	 * Other CPUs have different entry point.
-	 */
-	rsr     a3, PRID
-	extui   a3, a3, 0, 8	/* extract core ID */
-	beqz    a3, 2f
-	CALL    z_mp_entry
-
-2:
-#endif
-
 	/* Enter C domain, never returns from here */
-	CALL	z_cstart
+	CALL	z_prep_c
 
 	.size	_start, . - _start

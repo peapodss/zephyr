@@ -1,19 +1,40 @@
 /*
  * Copyright (c) 2017 Linaro Limited
+ * Copyright (c) 2023 Google Inc
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <kernel.h>
-#include <device.h>
 #include <string.h>
-#include <drivers/flash.h>
-#include <init.h>
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/flash.h>
+#include <zephyr/init.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/barrier.h>
+
 #include <soc.h>
 
 #include "flash_stm32.h"
 
-#define STM32F4X_SECTOR_MASK		((uint32_t) 0xFFFFFF07)
+LOG_MODULE_REGISTER(flash_stm32f4x, CONFIG_FLASH_LOG_LEVEL);
+
+#if FLASH_STM32_WRITE_BLOCK_SIZE == 8
+typedef uint64_t flash_prg_t;
+#define FLASH_PROGRAM_SIZE FLASH_PSIZE_DOUBLE_WORD
+#elif FLASH_STM32_WRITE_BLOCK_SIZE == 4
+typedef uint32_t flash_prg_t;
+#define FLASH_PROGRAM_SIZE FLASH_PSIZE_WORD
+#elif FLASH_STM32_WRITE_BLOCK_SIZE == 2
+typedef uint16_t flash_prg_t;
+#define FLASH_PROGRAM_SIZE FLASH_PSIZE_HALF_WORD
+#elif FLASH_STM32_WRITE_BLOCK_SIZE == 1
+typedef uint8_t flash_prg_t;
+#define FLASH_PROGRAM_SIZE FLASH_PSIZE_BYTE
+#else
+#error Write block size must be a power of 2, from 1 to 8
+#endif
 
 bool flash_stm32_valid_range(const struct device *dev, off_t offset,
 			     uint32_t len,
@@ -35,9 +56,36 @@ bool flash_stm32_valid_range(const struct device *dev, off_t offset,
 	return flash_stm32_range_exists(dev, offset, len);
 }
 
-static int write_byte(const struct device *dev, off_t offset, uint8_t val)
+static inline void flush_cache(FLASH_TypeDef *regs)
+{
+	if (regs->ACR & FLASH_ACR_DCEN) {
+		regs->ACR &= ~FLASH_ACR_DCEN;
+		/* Datasheet: DCRST: Data cache reset
+		 * This bit can be written only when the data cache is disabled
+		 */
+		regs->ACR |= FLASH_ACR_DCRST;
+		regs->ACR &= ~FLASH_ACR_DCRST;
+		regs->ACR |= FLASH_ACR_DCEN;
+	}
+
+	if (regs->ACR & FLASH_ACR_ICEN) {
+		regs->ACR &= ~FLASH_ACR_ICEN;
+		/* Datasheet: ICRST: Instruction cache reset :
+		 * This bit can be written only when the instruction cache
+		 * is disabled
+		 */
+		regs->ACR |= FLASH_ACR_ICRST;
+		regs->ACR &= ~FLASH_ACR_ICRST;
+		regs->ACR |= FLASH_ACR_ICEN;
+	}
+}
+
+static int write_value(const struct device *dev, off_t offset, flash_prg_t val)
 {
 	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+#if defined(FLASH_OPTCR_DB1M)
+	bool dcache_enabled = false;
+#endif /* FLASH_OPTCR_DB*/
 	uint32_t tmp;
 	int rc;
 
@@ -51,17 +99,37 @@ static int write_byte(const struct device *dev, off_t offset, uint8_t val)
 		return rc;
 	}
 
+#if defined(FLASH_OPTCR_DB1M)
+	/*
+	 * Disable the data cache to avoid the silicon errata ES0206 Rev 16 2.2.12:
+	 * "Data cache might be corrupted during Flash memory read-while-write operation"
+	 */
+	if (regs->ACR & FLASH_ACR_DCEN) {
+		dcache_enabled = true;
+		regs->ACR &= (~FLASH_ACR_DCEN);
+	}
+#endif /* FLASH_OPTCR_DB1M */
+
 	regs->CR &= CR_PSIZE_MASK;
-	regs->CR |= FLASH_PSIZE_BYTE;
+	regs->CR |= FLASH_PROGRAM_SIZE;
 	regs->CR |= FLASH_CR_PG;
 
 	/* flush the register write */
 	tmp = regs->CR;
 
-	*((uint8_t *) offset + CONFIG_FLASH_BASE_ADDRESS) = val;
+	*((flash_prg_t *)(offset + FLASH_STM32_BASE_ADDRESS)) = val;
 
 	rc = flash_stm32_wait_flash_idle(dev);
 	regs->CR &= (~FLASH_CR_PG);
+
+#if defined(FLASH_OPTCR_DB1M)
+	/* Reset/enable the data cache if previously enabled */
+	if (dcache_enabled) {
+		regs->ACR |= FLASH_ACR_DCRST;
+		regs->ACR &= (~FLASH_ACR_DCRST);
+		regs->ACR |= FLASH_ACR_DCEN;
+	}
+#endif /* FLASH_OPTCR_DB1M */
 
 	return rc;
 }
@@ -82,6 +150,13 @@ static int erase_sector(const struct device *dev, uint32_t sector)
 		return rc;
 	}
 
+	/*
+	 * If an erase operation in Flash memory also concerns data
+	 * in the instruction cache, the user has to ensure that these data
+	 * are rewritten before they are accessed during code execution.
+	 */
+	flush_cache(regs);
+
 #if FLASH_SECTOR_TOTAL == 24
 	/*
 	 * RM0090, §3.9.8: STM32F42xxx, STM32F43xxx
@@ -93,7 +168,10 @@ static int erase_sector(const struct device *dev, uint32_t sector)
 	}
 #endif
 
-	regs->CR &= STM32F4X_SECTOR_MASK;
+	regs->CR &= CR_PSIZE_MASK;
+	regs->CR |= FLASH_PROGRAM_SIZE;
+
+	regs->CR &= ~FLASH_CR_SNB;
 	regs->CR |= FLASH_CR_SER | (sector << 3);
 	regs->CR |= FLASH_CR_STRT;
 
@@ -140,9 +218,11 @@ int flash_stm32_write_range(const struct device *dev, unsigned int offset,
 			    const void *data, unsigned int len)
 {
 	int i, rc = 0;
+	flash_prg_t value;
 
-	for (i = 0; i < len; i++, offset++) {
-		rc = write_byte(dev, offset, ((const uint8_t *) data)[i]);
+	for (i = 0; i < len / sizeof(flash_prg_t); i++) {
+		value = UNALIGNED_GET((flash_prg_t *)data + i);
+		rc = write_value(dev, offset + i * sizeof(flash_prg_t), value);
 		if (rc < 0) {
 			return rc;
 		}
@@ -150,6 +230,84 @@ int flash_stm32_write_range(const struct device *dev, unsigned int offset,
 
 	return rc;
 }
+
+static __unused int write_optb(const struct device *dev, uint32_t mask,
+			       uint32_t value)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+	int rc;
+
+	if (regs->OPTCR & FLASH_OPTCR_OPTLOCK) {
+		return -EIO;
+	}
+
+	if ((regs->OPTCR & mask) == value) {
+		return 0;
+	}
+
+	rc = flash_stm32_wait_flash_idle(dev);
+	if (rc < 0) {
+		return rc;
+	}
+
+	regs->OPTCR = (regs->OPTCR & ~mask) | value;
+	regs->OPTCR |= FLASH_OPTCR_OPTSTRT;
+
+	/* Make sure previous write is completed. */
+	barrier_dsync_fence_full();
+
+	rc = flash_stm32_wait_flash_idle(dev);
+	if (rc < 0) {
+		return rc;
+	}
+
+	return 0;
+}
+
+#if defined(CONFIG_FLASH_STM32_WRITE_PROTECT)
+int flash_stm32_update_wp_sectors(const struct device *dev,
+				  uint32_t changed_sectors,
+				  uint32_t protected_sectors)
+{
+	changed_sectors <<= FLASH_OPTCR_nWRP_Pos;
+	protected_sectors <<= FLASH_OPTCR_nWRP_Pos;
+
+	if ((changed_sectors & FLASH_OPTCR_nWRP_Msk) != changed_sectors) {
+		return -EINVAL;
+	}
+
+	/* Sector is protected when bit == 0. Flip protected_sectors bits */
+	protected_sectors = ~protected_sectors & changed_sectors;
+
+	return write_optb(dev, changed_sectors, protected_sectors);
+}
+
+int flash_stm32_get_wp_sectors(const struct device *dev,
+			       uint32_t *protected_sectors)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+
+	*protected_sectors =
+		(~regs->OPTCR & FLASH_OPTCR_nWRP_Msk) >> FLASH_OPTCR_nWRP_Pos;
+
+	return 0;
+}
+#endif /* CONFIG_FLASH_STM32_WRITE_PROTECT */
+
+#if defined(CONFIG_FLASH_STM32_READOUT_PROTECTION)
+uint8_t flash_stm32_get_rdp_level(const struct device *dev)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+
+	return (regs->OPTCR & FLASH_OPTCR_RDP_Msk) >> FLASH_OPTCR_RDP_Pos;
+}
+
+void flash_stm32_set_rdp_level(const struct device *dev, uint8_t level)
+{
+	write_optb(dev, FLASH_OPTCR_RDP_Msk,
+		(uint32_t)level << FLASH_OPTCR_RDP_Pos);
+}
+#endif /* CONFIG_FLASH_STM32_READOUT_PROTECTION */
 
 /*
  * Different SoC flash layouts are specified in across various

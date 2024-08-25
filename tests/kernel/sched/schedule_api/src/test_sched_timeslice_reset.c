@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <ztest.h>
+#include <zephyr/ztest.h>
 #include "test_sched.h"
 
 #ifdef CONFIG_TIMESLICING
@@ -51,6 +51,8 @@ static void thread_time_slice(void *p1, void *p2, void *p3)
 {
 	uint32_t t = cycles_delta(&elapsed_slice);
 	uint32_t expected_slice_min, expected_slice_max;
+	uint32_t switch_tolerance_ticks =
+		k_ms_to_ticks_ceil32(TASK_SWITCH_TOLERANCE);
 
 	if (thread_idx == 0) {
 		/*
@@ -69,13 +71,13 @@ static void thread_time_slice(void *p1, void *p2, void *p3)
 		 * also expecting task switch below the switching tolerance.
 		 */
 		expected_slice_min =
-			(k_ms_to_ticks_ceil32(SLICE_SIZE)
-			 - TASK_SWITCH_TOLERANCE)
+			(k_ms_to_ticks_floor32(SLICE_SIZE)
+			 - switch_tolerance_ticks)
 			* k_ticks_to_cyc_floor32(1);
 		expected_slice_max =
 			(k_ms_to_ticks_ceil32(SLICE_SIZE)
-			 + TASK_SWITCH_TOLERANCE)
-			* k_ticks_to_cyc_floor32(1);
+			 + switch_tolerance_ticks)
+			* k_ticks_to_cyc_ceil32(1);
 	}
 
 #ifdef CONFIG_DEBUG
@@ -83,8 +85,14 @@ static void thread_time_slice(void *p1, void *p2, void *p3)
 		 thread_idx, t, expected_slice_min, expected_slice_max);
 #endif
 
+	/* Before the assert, otherwise in case of fail the output
+	 * will give the impression that the same thread ran more than
+	 * once
+	 */
+	thread_idx = (thread_idx + 1) % NUM_THREAD;
+
 	/** TESTPOINT: timeslice should be reset for each preemptive thread */
-#ifndef CONFIG_COVERAGE
+#ifndef CONFIG_COVERAGE_GCOV
 	zassert_true(t >= expected_slice_min,
 		     "timeslice too small, expected %u got %u",
 		     expected_slice_min, t);
@@ -93,8 +101,7 @@ static void thread_time_slice(void *p1, void *p2, void *p3)
 		     expected_slice_max, t);
 #else
 	(void)t;
-#endif /* CONFIG_COVERAGE */
-	thread_idx = (thread_idx + 1) % NUM_THREAD;
+#endif /* CONFIG_COVERAGE_GCOV */
 
 	/* Keep the current thread busy for more than one slice, even though,
 	 * when timeslice used up the next thread should be scheduled in.
@@ -117,7 +124,7 @@ static void thread_time_slice(void *p1, void *p2, void *p3)
  *
  * @ingroup kernel_sched_tests
  */
-void test_slice_reset(void)
+ZTEST(threads_scheduling, test_slice_reset)
 {
 	uint32_t t32;
 	k_tid_t tid[NUM_THREAD];
@@ -127,6 +134,22 @@ void test_slice_reset(void)
 	thread_idx = 0;
 	/* disable timeslice */
 	k_sched_time_slice_set(0, K_PRIO_PREEMPT(0));
+
+	/* The slice size needs to be set in ms (which get converted
+	 * into ticks internally), but we want to loop over a half
+	 * slice in cycles. That requires a bit of care to be sure the
+	 * value divides properly.
+	 */
+	uint32_t slice_ticks = k_ms_to_ticks_ceil32(SLICE_SIZE);
+	uint32_t half_slice_cyc = k_ticks_to_cyc_ceil32(slice_ticks / 2);
+
+	if (slice_ticks % 2 != 0) {
+		uint32_t deviation = k_ticks_to_cyc_ceil32(1);
+		/* slice_ticks can't be divisible by two, so we add the
+		 * (slice_ticks / 2) floating part back to half_slice_cyc.
+		 */
+		half_slice_cyc = half_slice_cyc + (deviation / 2);
+	}
 
 	for (int j = 0; j < 2; j++) {
 		k_sem_reset(&sema);
@@ -153,14 +176,12 @@ void test_slice_reset(void)
 
 		/* current thread (ztest native) consumed a half timeslice */
 		t32 = k_cycle_get_32();
-		while (k_cycle_get_32() - t32 < HALF_SLICE_SIZE_CYCLES) {
-#if defined(CONFIG_ARCH_POSIX)
-			k_busy_wait(50);
-#endif
+		while (k_cycle_get_32() - t32 < half_slice_cyc) {
+			Z_SPIN_DELAY(50);
 		}
 
 		/* relinquish CPU and wait for each thread to complete */
-		k_msleep(SLICE_SIZE * (NUM_THREAD + 1));
+		k_sleep(K_TICKS(slice_ticks * (NUM_THREAD + 1)));
 		for (int i = 0; i < NUM_THREAD; i++) {
 			k_sem_take(&sema, K_FOREVER);
 		}
@@ -176,7 +197,7 @@ void test_slice_reset(void)
 }
 
 #else /* CONFIG_TIMESLICING */
-void test_slice_reset(void)
+ZTEST(threads_scheduling, test_slice_reset)
 {
 	ztest_test_skip();
 }

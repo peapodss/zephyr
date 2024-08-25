@@ -14,25 +14,8 @@
 extern "C" {
 #endif
 
-#ifdef CONFIG_DEPRECATED_ZEPHYR_INT_TYPES
-
-typedef signed char         s8_t;
-typedef signed short        s16_t;
-typedef signed int          s32_t;
-typedef signed long long    s64_t;
-
-typedef unsigned char       u8_t;
-typedef unsigned short      u16_t;
-typedef unsigned int        u32_t;
-typedef unsigned long long  u64_t;
-
-#endif
-
-/* 32 bits on ILP32 builds, 64 bits on LP64 builts */
-typedef unsigned long       ulong_t;
-
 /*
- * A type with strong alignment requiremnts, similar to C11 max_align_t. It can
+ * A type with strong alignment requirements, similar to C11 max_align_t. It can
  * be used to force alignment of data structures allocated on the stack or as
  * return * type for heap allocators.
  */
@@ -45,6 +28,11 @@ typedef union {
 	void            *thepvoid;
 	void            (*thepfunc)(void);
 } z_max_align_t;
+
+#ifdef __cplusplus
+/* Zephyr requires an int main(void) signature with C linkage for the application main if present */
+extern int main(void);
+#endif
 
 #ifdef __cplusplus
 }

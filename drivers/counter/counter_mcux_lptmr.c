@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <zephyr/devicetree.h>
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_lptmr)
 #define DT_DRV_COMPAT nxp_kinetis_lptmr
+#else
+#define DT_DRV_COMPAT nxp_lptmr
+#endif
 
-#include <drivers/counter.h>
+#include <zephyr/drivers/counter.h>
+#include <zephyr/irq.h>
 #include <fsl_lptmr.h>
 
 struct mcux_lptmr_config {
@@ -103,14 +109,6 @@ static uint32_t mcux_lptmr_get_top_value(const struct device *dev)
 	return (config->base->CMR & LPTMR_CMR_COMPARE_MASK) + 1U;
 }
 
-static uint32_t mcux_lptmr_get_max_relative_alarm(const struct device *dev)
-{
-	ARG_UNUSED(dev);
-
-	/* Alarms not supported */
-	return 0;
-}
-
 static void mcux_lptmr_isr(const struct device *dev)
 {
 	const struct mcux_lptmr_config *config = dev->config;
@@ -144,6 +142,8 @@ static int mcux_lptmr_init(const struct device *dev)
 
 	LPTMR_Init(config->base, &lptmr_config);
 
+	LPTMR_SetTimerPeriod(config->base, config->info.max_top_value);
+
 	config->irq_config_func(dev);
 
 	return 0;
@@ -156,7 +156,6 @@ static const struct counter_driver_api mcux_lptmr_driver_api = {
 	.set_top_value = mcux_lptmr_set_top_value,
 	.get_pending_int = mcux_lptmr_get_pending_int,
 	.get_top_value = mcux_lptmr_get_top_value,
-	.get_max_relative_alarm = mcux_lptmr_get_max_relative_alarm,
 };
 
 #define TO_LPTMR_CLK_SEL(val) _DO_CONCAT(kLPTMR_PrescalerClock_, val)
@@ -213,7 +212,8 @@ static void mcux_lptmr_irq_config_0(const struct device *dev);
 
 static struct mcux_lptmr_config mcux_lptmr_config_0 = {
 	.info = {
-		.max_top_value = UINT16_MAX,
+		.max_top_value = ((DT_INST_PROP(0, resolution) == 32)
+				? UINT32_MAX : UINT16_MAX),
 		.freq = DT_INST_PROP(0, clock_frequency) /
 			DT_INST_PROP(0, prescaler),
 		.flags = COUNTER_CONFIG_INFO_COUNT_UP,
@@ -241,16 +241,16 @@ static struct mcux_lptmr_config mcux_lptmr_config_0 = {
 	.irq_config_func = mcux_lptmr_irq_config_0,
 };
 
-DEVICE_AND_API_INIT(mcux_lptmr_0, DT_INST_LABEL(0),
-		    &mcux_lptmr_init, &mcux_lptmr_data_0,
+DEVICE_DT_INST_DEFINE(0, &mcux_lptmr_init, NULL,
+		    &mcux_lptmr_data_0,
 		    &mcux_lptmr_config_0,
-		    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
+		    POST_KERNEL, CONFIG_COUNTER_INIT_PRIORITY,
 		    &mcux_lptmr_driver_api);
 
 static void mcux_lptmr_irq_config_0(const struct device *dev)
 {
 	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority),
-		    mcux_lptmr_isr, DEVICE_GET(mcux_lptmr_0), 0);
+		    mcux_lptmr_isr, DEVICE_DT_INST_GET(0), 0);
 	irq_enable(DT_INST_IRQN(0));
 }
 #endif	/* DT_NODE_HAS_STATUS(DT_DRV_INST(0), okay) */

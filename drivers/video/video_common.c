@@ -3,23 +3,26 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#include <zephyr.h>
+#include <zephyr/kernel.h>
 
-#include <drivers/video.h>
+#include <zephyr/drivers/video.h>
 
-K_MEM_POOL_DEFINE(video_buffer_pool,
-		  CONFIG_VIDEO_BUFFER_POOL_ALIGN,
-		  CONFIG_VIDEO_BUFFER_POOL_SZ_MAX,
-		  CONFIG_VIDEO_BUFFER_POOL_NUM_MAX,
-		  CONFIG_VIDEO_BUFFER_POOL_ALIGN);
+K_HEAP_DEFINE(video_buffer_pool,
+	      CONFIG_VIDEO_BUFFER_POOL_SZ_MAX *
+	      CONFIG_VIDEO_BUFFER_POOL_NUM_MAX);
 
 static struct video_buffer video_buf[CONFIG_VIDEO_BUFFER_POOL_NUM_MAX];
-static struct k_mem_block video_block[CONFIG_VIDEO_BUFFER_POOL_NUM_MAX];
 
-struct video_buffer *video_buffer_alloc(size_t size)
+struct mem_block {
+	void *data;
+};
+
+static struct mem_block video_block[CONFIG_VIDEO_BUFFER_POOL_NUM_MAX];
+
+struct video_buffer *video_buffer_aligned_alloc(size_t size, size_t align)
 {
 	struct video_buffer *vbuf = NULL;
-	struct k_mem_block *block;
+	struct mem_block *block;
 	int i;
 
 	/* find available video buffer */
@@ -36,7 +39,8 @@ struct video_buffer *video_buffer_alloc(size_t size)
 	}
 
 	/* Alloc buffer memory */
-	if (k_mem_pool_alloc(&video_buffer_pool, block, size, K_FOREVER)) {
+	block->data = k_heap_aligned_alloc(&video_buffer_pool, align, size, K_FOREVER);
+	if (block->data == NULL) {
 		return NULL;
 	}
 
@@ -47,13 +51,18 @@ struct video_buffer *video_buffer_alloc(size_t size)
 	return vbuf;
 }
 
+struct video_buffer *video_buffer_alloc(size_t size)
+{
+	return video_buffer_aligned_alloc(size, sizeof(void *));
+}
+
 void video_buffer_release(struct video_buffer *vbuf)
 {
-	struct k_mem_block *block = NULL;
+	struct mem_block *block = NULL;
 	int i;
 
 	/* vbuf to block */
-	for (i = 0; i < ARRAY_SIZE(video_buf); i++) {
+	for (i = 0; i < ARRAY_SIZE(video_block); i++) {
 		if (video_block[i].data == vbuf->buffer) {
 			block = &video_block[i];
 			break;
@@ -61,5 +70,7 @@ void video_buffer_release(struct video_buffer *vbuf)
 	}
 
 	vbuf->buffer = NULL;
-	k_mem_pool_free(block);
+	if (block) {
+		k_heap_free(&video_buffer_pool, block->data);
+	}
 }
